@@ -22,7 +22,7 @@ albaran_factura_es:
 
     Reglas CABECERA:
     - proveedor_nombre: razón social del proveedor (emisor del albarán). puede venir en el logo, suele estar en la parte superior
-    - proveedor_cif: CIF/NIF/NIE del proveedor.
+    - proveedor_cif: CIF/NIF/NIE del proveedor segun formato español. Busca el codigo por un campo que ponga CIF o NIF o NIE, si no puede ser un codigo cerca de la razon solcial en cabecera.
     - fecha: la del albarán.
     - numero_albaran: identificador del documento (no pedido/cliente).
     - forma_pago: 'contado', 'transferencia', '30 días', etc.

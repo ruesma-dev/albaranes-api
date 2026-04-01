@@ -8,6 +8,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     openai_api_key: str = Field(..., alias="OPENAI_API_KEY")
     openai_model: str = Field("gpt-5", alias="OPENAI_MODEL")
+    gemini_api_key: str = Field(..., alias="GEMINI_API_KEY")
+    gemini_model: str = Field("gemini-2.5-flash", alias="GEMINI_MODEL")
     prompt_key: str = Field("albaran_factura_es", alias="PROMPT_KEY")
     prompts_yaml_path: str = Field(
         "config/prompts.yaml",

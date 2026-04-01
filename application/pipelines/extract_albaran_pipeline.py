@@ -28,12 +28,14 @@ class ExtractAlbaranPipeline:
         self,
         *,
         extraction_service: AlbaranExtractionService,
-        model_name: str,
+        openai_model_name: str,
+        gemini_model_name: str,
         max_file_mb: int,
         service_version: str,
     ) -> None:
         self._service = extraction_service
-        self._model_name = model_name
+        self._openai_model_name = openai_model_name
+        self._gemini_model_name = gemini_model_name
         self._max_file_mb = max_file_mb
         self._service_version = service_version
 
@@ -69,6 +71,28 @@ class ExtractAlbaranPipeline:
             data=file_bytes,
         )
 
+    def _provider_meta(
+        self,
+        *,
+        prompt_key: str,
+        schema_name: str,
+        filename: str,
+        mime_type: str,
+        sha256: str,
+        model_name: str,
+    ) -> Dict[str, Any]:
+        return {
+            "prompt_key": prompt_key,
+            "schema": schema_name,
+            "source_filename": filename,
+            "source_mime_type": mime_type,
+            "source_sha256": sha256,
+            "model": model_name,
+            "processed_at_utc": self._utc_iso(),
+            "service": "albaranes-extractor-api",
+            "service_version": self._service_version,
+        }
+
     def run(self, request: ExtractAlbaranRequest) -> Dict[str, Any]:
         if not request.file_bytes:
             raise ValueError("Archivo vacío.")
@@ -85,24 +109,31 @@ class ExtractAlbaranPipeline:
             mime_type=request.mime_type,
             file_bytes=request.file_bytes,
         )
-        parsed, schema_name, prompt_key, debug_payload = self._service.extract(
-            attachment
-        )
+        openai_result, gemini_result = self._service.extract(attachment)
         sha256 = hashlib.sha256(request.file_bytes).hexdigest()
 
         envelope = {
-            "meta": {
-                "prompt_key": prompt_key,
-                "schema": schema_name,
-                "source_filename": attachment.filename,
-                "source_mime_type": attachment.mime_type,
-                "source_sha256": sha256,
-                "model": self._model_name,
-                "processed_at_utc": self._utc_iso(),
-                "service": "albaranes-extractor-api",
-                "service_version": self._service_version,
+            "meta": self._provider_meta(
+                prompt_key=openai_result.prompt_key,
+                schema_name=openai_result.schema_name,
+                filename=attachment.filename,
+                mime_type=attachment.mime_type,
+                sha256=sha256,
+                model_name=self._openai_model_name,
+            ),
+            "data": openai_result.parsed.model_dump(),
+            "debug": openai_result.debug_payload,
+            "gemini": {
+                "meta": self._provider_meta(
+                    prompt_key=gemini_result.prompt_key,
+                    schema_name=gemini_result.schema_name,
+                    filename=attachment.filename,
+                    mime_type=attachment.mime_type,
+                    sha256=sha256,
+                    model_name=self._gemini_model_name,
+                ),
+                "data": gemini_result.parsed.model_dump(),
+                "debug": gemini_result.debug_payload,
             },
-            "data": parsed.model_dump(),
-            "debug": debug_payload,
         }
         return envelope
