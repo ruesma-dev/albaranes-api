@@ -36,14 +36,18 @@ albaran_factura_es:
     - descuento: si aparece, como número.
     - precio_neto: si figura, léelo; si no, calcula
       cantidad*precio*(1 - descuento/100) cuando sea posible.
-
+    
     Código de imputación manuscrito:
-    - Puede indicarse con flechas, rayas, llaves, '->', o por proximidad/altura.
-    - Si hay un único código manuscrito visible sin ambigüedad, aplícalo
-      a todas las líneas.
-    - Si hay varios, asigna por cercanía vertical y señales gráficas.
-    - Si una línea no puede asociarse con claridad: codigo_imputacion = null.
-    - confianza_pct (0–100) según certeza.
+      - Es un texto manuscrito SIEMPRE.
+      - Puede estar asociado a una línea por cercanía, raya, flecha o llave.
+      - Si solo hay un código claro en todo el documento, se aplica a todas las líneas.
+      - Formatos válidos: XX.XX, XX.XX.XX, XX.X.X, CI.XX.XX y variantes con más segmentos.
+      - Cuando un segmento numérico tenga un solo dígito, normalízalo con cero a la izquierda.
+      - Si no puede asociarse con claridad, devuelve null.
+      - No es el codigo que pone el proveedor en la linea del albaran. Siempre es a mano. 
+      - Revisa en la parte superior en inferior, porque pueden estar ahi escritos, y aplica a todo el documento.
+      - Si hay varios escritos en los margenes, sin relacion clara con la linea, aplica solo el primero a todo el documento.
+
   schema_hint: >
     Devuelve null cuando falte información o haya duda. No inventes.
     No mezcles líneas. Devuelve SOLO JSON válido.

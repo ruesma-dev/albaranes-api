@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Type
+from typing import Any, Dict, Iterable, Type
 
 from pydantic import BaseModel
 
@@ -14,6 +14,14 @@ from domain.ports.llm_client import LlmVisionClient
 from domain.ports.prompt_repository import PromptRepository
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ProviderClientSpec:
+    provider: str
+    model_name: str
+    client: LlmVisionClient
+    prompt_supported: bool = True
 
 
 @dataclass(frozen=True)
@@ -30,20 +38,14 @@ class AlbaranExtractionService:
     def __init__(
         self,
         *,
-        openai_client: LlmVisionClient,
-        gemini_client: LlmVisionClient,
+        providers: Iterable[ProviderClientSpec],
         prompt_repo: PromptRepository,
         schema_registry: SchemaRegistry,
-        openai_model: str,
-        gemini_model: str,
         prompt_key: str,
     ) -> None:
-        self._openai = openai_client
-        self._gemini = gemini_client
+        self._providers = list(providers)
         self._prompts = prompt_repo
         self._schemas = schema_registry
-        self._openai_model = openai_model
-        self._gemini_model = gemini_model
         self._prompt_key = prompt_key
 
     @staticmethod
@@ -59,26 +61,32 @@ class AlbaranExtractionService:
     def _extract_with_provider(
         self,
         *,
-        provider: str,
-        client: LlmVisionClient,
-        model_name: str,
+        spec: ProviderClientSpec,
         instructions: str,
         user_text: str,
         attachment: LlmAttachment,
         response_model: Type[BaseModel],
         schema_name: str,
     ) -> ProviderExtractionResult:
-        parsed = client.extract_document(
-            model=model_name,
+        parsed = spec.client.extract_document(
+            model=spec.model_name,
             instructions=instructions,
             user_text=user_text,
             attachment=attachment,
             response_model=response_model,
         )
+        prompt_note = None
+        if not spec.prompt_supported:
+            prompt_note = (
+                "La API de este proveedor no acepta un prompt arbitrario por petición; "
+                "se conserva el mismo prompt para trazabilidad, pero la extracción la "
+                "gobierna el modelo/procesador configurado."
+            )
+
         debug_payload: Dict[str, Any] = {
-            f"{provider}_request": {
-                "provider": provider,
-                "model": model_name,
+            f"{spec.provider}_request": {
+                "provider": spec.provider,
+                "model": spec.model_name,
                 "prompt_key": self._prompt_key,
                 "instructions": instructions,
                 "user_text": user_text,
@@ -86,58 +94,47 @@ class AlbaranExtractionService:
                 "response_model_name": response_model.__name__,
                 "response_schema_json": response_model.model_json_schema(),
                 "attachment": self._attachment_debug(attachment),
+                "prompt_supported": spec.prompt_supported,
+                "prompt_note": prompt_note,
             },
-            f"{provider}_response": {
-                "provider": provider,
-                "model": model_name,
+            f"{spec.provider}_response": {
+                "provider": spec.provider,
+                "model": spec.model_name,
                 "parsed": parsed.model_dump(),
             },
         }
         return ProviderExtractionResult(
-            provider=provider,
-            model_name=model_name,
+            provider=spec.provider,
+            model_name=spec.model_name,
             schema_name=schema_name,
             prompt_key=self._prompt_key,
             parsed=parsed,
             debug_payload=debug_payload,
         )
 
-    def extract(
-        self,
-        attachment: LlmAttachment,
-    ) -> tuple[ProviderExtractionResult, ProviderExtractionResult]:
+    def extract(self, attachment: LlmAttachment) -> Dict[str, ProviderExtractionResult]:
         spec = self._prompts.get(self._prompt_key)
         response_model: Type[BaseModel] = self._schemas.get(spec.schema)
-        logger.info(
-            "Extracción albarán dual. prompt_key=%s schema=%s openai_model=%s gemini_model=%s filename=%s",
-            self._prompt_key,
-            spec.schema,
-            self._openai_model,
-            self._gemini_model,
-            attachment.filename,
-        )
         user_text = "\n\n".join(
             part for part in [spec.task, spec.schema_hint] if part
         ).strip()
 
-        openai_result = self._extract_with_provider(
-            provider="openai",
-            client=self._openai,
-            model_name=self._openai_model,
-            instructions=spec.system,
-            user_text=user_text,
-            attachment=attachment,
-            response_model=response_model,
-            schema_name=spec.schema,
-        )
-        gemini_result = self._extract_with_provider(
-            provider="gemini",
-            client=self._gemini,
-            model_name=self._gemini_model,
-            instructions=spec.system,
-            user_text=user_text,
-            attachment=attachment,
-            response_model=response_model,
-            schema_name=spec.schema,
-        )
-        return openai_result, gemini_result
+        results: Dict[str, ProviderExtractionResult] = {}
+        for provider_spec in self._providers:
+            logger.info(
+                "Extracción albarán proveedor=%s prompt_key=%s schema=%s model=%s filename=%s",
+                provider_spec.provider,
+                self._prompt_key,
+                spec.schema,
+                provider_spec.model_name,
+                attachment.filename,
+            )
+            results[provider_spec.provider] = self._extract_with_provider(
+                spec=provider_spec,
+                instructions=spec.system,
+                user_text=user_text,
+                attachment=attachment,
+                response_model=response_model,
+                schema_name=spec.schema,
+            )
+        return results

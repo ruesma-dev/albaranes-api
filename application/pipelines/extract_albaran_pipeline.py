@@ -10,6 +10,7 @@ from typing import Any, Dict
 
 from application.services.albaran_extraction_service import (
     AlbaranExtractionService,
+    ProviderExtractionResult,
 )
 from domain.models.llm_attachment import LlmAttachment
 
@@ -28,14 +29,10 @@ class ExtractAlbaranPipeline:
         self,
         *,
         extraction_service: AlbaranExtractionService,
-        openai_model_name: str,
-        gemini_model_name: str,
         max_file_mb: int,
         service_version: str,
     ) -> None:
         self._service = extraction_service
-        self._openai_model_name = openai_model_name
-        self._gemini_model_name = gemini_model_name
         self._max_file_mb = max_file_mb
         self._service_version = service_version
 
@@ -74,23 +71,40 @@ class ExtractAlbaranPipeline:
     def _provider_meta(
         self,
         *,
-        prompt_key: str,
-        schema_name: str,
+        provider_result: ProviderExtractionResult,
         filename: str,
         mime_type: str,
         sha256: str,
-        model_name: str,
     ) -> Dict[str, Any]:
         return {
-            "prompt_key": prompt_key,
-            "schema": schema_name,
+            "prompt_key": provider_result.prompt_key,
+            "schema": provider_result.schema_name,
             "source_filename": filename,
             "source_mime_type": mime_type,
             "source_sha256": sha256,
-            "model": model_name,
+            "model": provider_result.model_name,
             "processed_at_utc": self._utc_iso(),
             "service": "albaranes-extractor-api",
             "service_version": self._service_version,
+        }
+
+    def _provider_block(
+        self,
+        *,
+        provider_result: ProviderExtractionResult,
+        filename: str,
+        mime_type: str,
+        sha256: str,
+    ) -> Dict[str, Any]:
+        return {
+            "meta": self._provider_meta(
+                provider_result=provider_result,
+                filename=filename,
+                mime_type=mime_type,
+                sha256=sha256,
+            ),
+            "data": provider_result.parsed.model_dump(),
+            "debug": provider_result.debug_payload,
         }
 
     def run(self, request: ExtractAlbaranRequest) -> Dict[str, Any]:
@@ -109,31 +123,32 @@ class ExtractAlbaranPipeline:
             mime_type=request.mime_type,
             file_bytes=request.file_bytes,
         )
-        openai_result, gemini_result = self._service.extract(attachment)
-        sha256 = hashlib.sha256(request.file_bytes).hexdigest()
+        results = self._service.extract(attachment)
+        openai_result = results.get("openai")
+        if openai_result is None:
+            raise RuntimeError("La extracción de OpenAI es obligatoria.")
 
-        envelope = {
-            "meta": self._provider_meta(
-                prompt_key=openai_result.prompt_key,
-                schema_name=openai_result.schema_name,
+        sha256 = hashlib.sha256(request.file_bytes).hexdigest()
+        envelope = self._provider_block(
+            provider_result=openai_result,
+            filename=attachment.filename,
+            mime_type=attachment.mime_type,
+            sha256=sha256,
+        )
+
+        for provider_name in (
+            "gemini",
+            "google_document_ai",
+            "azure_document_intelligence",
+        ):
+            provider_result = results.get(provider_name)
+            if provider_result is None:
+                continue
+            envelope[provider_name] = self._provider_block(
+                provider_result=provider_result,
                 filename=attachment.filename,
                 mime_type=attachment.mime_type,
                 sha256=sha256,
-                model_name=self._openai_model_name,
-            ),
-            "data": openai_result.parsed.model_dump(),
-            "debug": openai_result.debug_payload,
-            "gemini": {
-                "meta": self._provider_meta(
-                    prompt_key=gemini_result.prompt_key,
-                    schema_name=gemini_result.schema_name,
-                    filename=attachment.filename,
-                    mime_type=attachment.mime_type,
-                    sha256=sha256,
-                    model_name=self._gemini_model_name,
-                ),
-                "data": gemini_result.parsed.model_dump(),
-                "debug": gemini_result.debug_payload,
-            },
-        }
+            )
+
         return envelope
