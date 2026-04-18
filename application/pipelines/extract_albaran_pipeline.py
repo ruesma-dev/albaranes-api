@@ -138,6 +138,7 @@ class ExtractAlbaranPipeline:
 
         for provider_name in (
             "gemini",
+            "claude",
             "google_document_ai",
             "azure_document_intelligence",
         ):

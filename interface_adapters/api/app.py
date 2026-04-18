@@ -20,6 +20,9 @@ from config.settings import Settings
 from infrastructure.llm.azure_document_intelligence_client import (
     AzureDocumentIntelligenceVisionClient,
 )
+from infrastructure.llm.claude_messages_client import (
+    ClaudeMessagesVisionClient,
+)
 from infrastructure.llm.gemini_genai_client import GeminiGenAiVisionClient
 from infrastructure.llm.google_document_ai_client import (
     GoogleDocumentAiVisionClient,
@@ -49,6 +52,16 @@ def build_app(settings: Settings) -> FastAPI:
             provider="gemini",
             model_name=settings.gemini_model,
             client=GeminiGenAiVisionClient(settings.gemini_api_key),
+            prompt_supported=True,
+        ),
+        ProviderClientSpec(
+            provider="claude",
+            model_name=settings.anthropic_model,
+            client=ClaudeMessagesVisionClient(
+                api_key=settings.anthropic_api_key,
+                max_tokens=settings.anthropic_max_tokens,
+                timeout_s=settings.anthropic_timeout_s,
+            ),
             prompt_supported=True,
         ),
     ]

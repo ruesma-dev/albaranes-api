@@ -26,10 +26,10 @@ albaran_factura_es:
     - fecha: la del albarán.
     - numero_albaran: identificador del documento (no pedido/cliente).
     - forma_pago: 'contado', 'transferencia', '30 días', etc.
-    - obra_codigo / obra_nombre / obra_direccion si figuran.
+    - obra_codigo. es un codigo de 4 numeros que empieza por 0. es posible que este escrito a mano, o que solo esten los 3 ultimos numeros, en cuyo caso normalizalo a 4 añadiendo el 0 como primer digito.
 
     Reglas LÍNEAS:
-    - Identifica cada línea de concepto.
+    - Identifica cada línea de concepto. En el caso de albaranes de hormigon, el tiempo de carga y descarga (devuelve el tiempo neto) debes contabilizarlo como otra linea adicional a la cantidad
     - Evita subtotales, totales, IVA, portes u observaciones generales.
     - cantidad: número (ignora unidades). Si no encuentras cantidad como tal, usa el peso neto. si no lo encuentras usa peso bruto - tara
     - precio: unitario sin IVA.

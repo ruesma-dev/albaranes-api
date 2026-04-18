@@ -11,6 +11,20 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(..., alias="GEMINI_API_KEY")
     gemini_model: str = Field("gemini-2.5-flash", alias="GEMINI_MODEL")
 
+    anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
+    anthropic_model: str = Field(
+        "claude-sonnet-4-5",
+        alias="ANTHROPIC_MODEL",
+    )
+    anthropic_max_tokens: int = Field(
+        8192,
+        alias="ANTHROPIC_MAX_TOKENS",
+    )
+    anthropic_timeout_s: int = Field(
+        120,
+        alias="ANTHROPIC_TIMEOUT_S",
+    )
+
     google_document_ai_enabled: bool = Field(
         False,
         alias="GOOGLE_DOCUMENT_AI_ENABLED",
