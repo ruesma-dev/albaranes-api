@@ -75,6 +75,14 @@ class Settings(BaseSettings):
         alias="AZURE_DOCUMENT_INTELLIGENCE_TIMEOUT_S",
     )
 
+    # --------------------------------------------------------------
+    # Política de reintentos común para los clientes LLM
+    # (openai / gemini / claude). Ver infrastructure/llm/retry_policy.py
+    # --------------------------------------------------------------
+    llm_max_retries: int = Field(2, alias="LLM_MAX_RETRIES")
+    llm_backoff_base_s: float = Field(2.0, alias="LLM_BACKOFF_BASE_S")
+    llm_backoff_cap_s: float = Field(30.0, alias="LLM_BACKOFF_CAP_S")
+
     prompt_key: str = Field("albaran_factura_es", alias="PROMPT_KEY")
     prompts_yaml_path: str = Field(
         "config/prompts.yaml",

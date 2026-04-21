@@ -12,14 +12,21 @@ from pydantic import BaseModel
 from domain.models.llm_attachment import LlmAttachment
 from domain.ports.llm_client import LlmVisionClient
 from infrastructure.llm.openai_sdk_compat import patch_openai_pydantic_compat
+from infrastructure.llm.retry_policy import RetryPolicy, run_with_retry
 
 logger = logging.getLogger(__name__)
 
 
 class OpenAIResponsesVisionClient(LlmVisionClient):
-    def __init__(self, api_key: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        retry_policy: RetryPolicy | None = None,
+    ) -> None:
         patch_openai_pydantic_compat()
         self._client = OpenAI(api_key=api_key)
+        self._retry_policy = retry_policy or RetryPolicy()
 
     @staticmethod
     def _to_data_url(mime_type: str, data: bytes) -> str:
@@ -84,12 +91,21 @@ class OpenAIResponsesVisionClient(LlmVisionClient):
                 },
             ]
 
-        response = self._client.responses.parse(
-            model=model,
-            instructions=instructions,
-            input=[{"role": "user", "content": content}],
-            text_format=response_model,
+        # La llamada HTTP al SDK es lo único que va dentro del retry.
+        # El parseo del resultado (output_parsed / output_text) NO se
+        # reintenta: un fallo de parseo sobre la misma respuesta siempre
+        # dará el mismo error.
+        response = run_with_retry(
+            provider="openai",
+            operation=lambda: self._client.responses.parse(
+                model=model,
+                instructions=instructions,
+                input=[{"role": "user", "content": content}],
+                text_format=response_model,
+            ),
+            policy=self._retry_policy,
         )
+
         if response.output_parsed is not None:
             return response.output_parsed
 

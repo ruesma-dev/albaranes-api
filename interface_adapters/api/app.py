@@ -30,6 +30,7 @@ from infrastructure.llm.google_document_ai_client import (
 from infrastructure.llm.openai_responses_client import (
     OpenAIResponsesVisionClient,
 )
+from infrastructure.llm.retry_policy import RetryPolicy
 from infrastructure.prompts.yaml_prompt_repository import YamlPromptRepository
 
 
@@ -41,17 +42,33 @@ def build_app(settings: Settings) -> FastAPI:
     prompt_repo = YamlPromptRepository(settings.prompts_yaml_path)
     schema_registry = SchemaRegistry()
 
+    # Política de reintentos compartida por los tres clientes LLM.
+    # Los proveedores de OCR puro (Google Document AI, Azure Document
+    # Intelligence) no la reciben: ya traen retry interno en sus SDKs
+    # y aplicar otra capa encima duplicaría tiempos sin beneficio.
+    retry_policy = RetryPolicy(
+        max_retries=settings.llm_max_retries,
+        backoff_base_s=settings.llm_backoff_base_s,
+        backoff_cap_s=settings.llm_backoff_cap_s,
+    )
+
     providers: list[ProviderClientSpec] = [
         ProviderClientSpec(
             provider="openai",
             model_name=settings.openai_model,
-            client=OpenAIResponsesVisionClient(settings.openai_api_key),
+            client=OpenAIResponsesVisionClient(
+                settings.openai_api_key,
+                retry_policy=retry_policy,
+            ),
             prompt_supported=True,
         ),
         ProviderClientSpec(
             provider="gemini",
             model_name=settings.gemini_model,
-            client=GeminiGenAiVisionClient(settings.gemini_api_key),
+            client=GeminiGenAiVisionClient(
+                settings.gemini_api_key,
+                retry_policy=retry_policy,
+            ),
             prompt_supported=True,
         ),
         ProviderClientSpec(
@@ -61,6 +78,7 @@ def build_app(settings: Settings) -> FastAPI:
                 api_key=settings.anthropic_api_key,
                 max_tokens=settings.anthropic_max_tokens,
                 timeout_s=settings.anthropic_timeout_s,
+                retry_policy=retry_policy,
             ),
             prompt_supported=True,
         ),
@@ -163,6 +181,11 @@ def build_app(settings: Settings) -> FastAPI:
                 }
                 for provider in providers
             ],
+            "retry_policy": {
+                "max_retries": settings.llm_max_retries,
+                "backoff_base_s": settings.llm_backoff_base_s,
+                "backoff_cap_s": settings.llm_backoff_cap_s,
+            },
         }
 
     @app.post("/v1/albaranes/extract")

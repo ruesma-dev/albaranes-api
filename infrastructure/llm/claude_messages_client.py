@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from domain.models.llm_attachment import LlmAttachment
 from domain.ports.llm_client import LlmVisionClient
+from infrastructure.llm.retry_policy import RetryPolicy, run_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,14 @@ class ClaudeMessagesVisionClient(LlmVisionClient):
         api_key: str,
         max_tokens: int = 8192,
         timeout_s: int = 120,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._client = anthropic.Anthropic(
             api_key=api_key,
             timeout=float(timeout_s),
         )
         self._max_tokens = int(max_tokens)
+        self._retry_policy = retry_policy or RetryPolicy()
 
     @staticmethod
     def _sanitize_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -139,13 +142,18 @@ class ClaudeMessagesVisionClient(LlmVisionClient):
             user_text=user_text,
         )
 
-        response = self._client.messages.create(
-            model=model,
-            max_tokens=self._max_tokens,
-            system=instructions,
-            tools=[tool_spec],
-            tool_choice={"type": "tool", "name": _TOOL_NAME},
-            messages=[{"role": "user", "content": content}],
+        # Solo la llamada HTTP al SDK va envuelta en reintentos.
+        response = run_with_retry(
+            provider="claude",
+            operation=lambda: self._client.messages.create(
+                model=model,
+                max_tokens=self._max_tokens,
+                system=instructions,
+                tools=[tool_spec],
+                tool_choice={"type": "tool", "name": _TOOL_NAME},
+                messages=[{"role": "user", "content": content}],
+            ),
+            policy=self._retry_policy,
         )
 
         for block in response.content or []:

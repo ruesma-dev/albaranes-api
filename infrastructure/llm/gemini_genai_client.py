@@ -11,13 +11,20 @@ from pydantic import BaseModel
 
 from domain.models.llm_attachment import LlmAttachment
 from domain.ports.llm_client import LlmVisionClient
+from infrastructure.llm.retry_policy import RetryPolicy, run_with_retry
 
 logger = logging.getLogger(__name__)
 
 
 class GeminiGenAiVisionClient(LlmVisionClient):
-    def __init__(self, api_key: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        retry_policy: RetryPolicy | None = None,
+    ) -> None:
         self._client = genai.Client(api_key=api_key)
+        self._retry_policy = retry_policy or RetryPolicy()
 
     def extract_document(
         self,
@@ -39,20 +46,27 @@ class GeminiGenAiVisionClient(LlmVisionClient):
         )
 
         response_schema = response_model.model_json_schema()
-        response = self._client.models.generate_content(
-            model=model,
-            contents=[
-                types.Part.from_bytes(
-                    data=attachment.data,
-                    mime_type=attachment.mime_type,
+
+        # Solo la llamada HTTP va envuelta en reintentos. El parseo local
+        # es determinista y no tiene sentido reintentarlo.
+        response = run_with_retry(
+            provider="gemini",
+            operation=lambda: self._client.models.generate_content(
+                model=model,
+                contents=[
+                    types.Part.from_bytes(
+                        data=attachment.data,
+                        mime_type=attachment.mime_type,
+                    ),
+                    user_text,
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=instructions,
+                    response_mime_type="application/json",
+                    response_json_schema=response_schema,
                 ),
-                user_text,
-            ],
-            config=types.GenerateContentConfig(
-                system_instruction=instructions,
-                response_mime_type="application/json",
-                response_json_schema=response_schema,
             ),
+            policy=self._retry_policy,
         )
 
         parsed = getattr(response, "parsed", None)
