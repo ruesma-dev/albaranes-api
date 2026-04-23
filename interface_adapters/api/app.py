@@ -1,6 +1,7 @@
 # interface_adapters/api/app.py
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Dict, List
 
@@ -33,6 +34,8 @@ from infrastructure.llm.openai_responses_client import (
 from infrastructure.llm.retry_policy import RetryPolicy
 from infrastructure.prompts.yaml_prompt_repository import YamlPromptRepository
 
+logger = logging.getLogger(__name__)
+
 
 def _parse_origins(value: str) -> List[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
@@ -52,37 +55,65 @@ def build_app(settings: Settings) -> FastAPI:
         backoff_cap_s=settings.llm_backoff_cap_s,
     )
 
-    providers: list[ProviderClientSpec] = [
-        ProviderClientSpec(
-            provider="openai",
-            model_name=settings.openai_model,
-            client=OpenAIResponsesVisionClient(
-                settings.openai_api_key,
-                retry_policy=retry_policy,
-            ),
-            prompt_supported=True,
-        ),
-        ProviderClientSpec(
-            provider="gemini",
-            model_name=settings.gemini_model,
-            client=GeminiGenAiVisionClient(
-                settings.gemini_api_key,
-                retry_policy=retry_policy,
-            ),
-            prompt_supported=True,
-        ),
-        ProviderClientSpec(
-            provider="claude",
-            model_name=settings.anthropic_model,
-            client=ClaudeMessagesVisionClient(
-                api_key=settings.anthropic_api_key,
-                max_tokens=settings.anthropic_max_tokens,
-                timeout_s=settings.anthropic_timeout_s,
-                retry_policy=retry_policy,
-            ),
-            prompt_supported=True,
-        ),
-    ]
+    # ------------------------------------------------------------------ #
+    # Construcción condicional de proveedores LLM.
+    #
+    # Respetamos las flags ``ENABLE_OPENAI`` / ``ENABLE_GEMINI`` /
+    # ``ENABLE_CLAUDE`` del .env. Si un proveedor está a false, NO se
+    # instancia su cliente — lo que significa que no se llama a su API
+    # al extraer, no se consumen tokens ni cuota. El servicio 3 (merge)
+    # ya trata Gemini/Claude como opcionales; OpenAI sigue siendo
+    # obligatorio porque el pipeline lo exige para poder construir el
+    # envelope (si quisiéramos desactivar OpenAI habría que revisitar
+    # esa decisión — fuera del alcance de este fix).
+    # ------------------------------------------------------------------ #
+    providers: list[ProviderClientSpec] = []
+
+    if settings.openai_enabled:
+        providers.append(
+            ProviderClientSpec(
+                provider="openai",
+                model_name=settings.openai_model,
+                client=OpenAIResponsesVisionClient(
+                    settings.openai_api_key,
+                    retry_policy=retry_policy,
+                ),
+                prompt_supported=True,
+            )
+        )
+
+    if settings.gemini_enabled:
+        providers.append(
+            ProviderClientSpec(
+                provider="gemini",
+                model_name=settings.gemini_model,
+                client=GeminiGenAiVisionClient(
+                    settings.gemini_api_key,
+                    retry_policy=retry_policy,
+                ),
+                prompt_supported=True,
+            )
+        )
+
+    if settings.claude_enabled:
+        providers.append(
+            ProviderClientSpec(
+                provider="claude",
+                model_name=settings.anthropic_model,
+                client=ClaudeMessagesVisionClient(
+                    api_key=settings.anthropic_api_key,
+                    max_tokens=settings.anthropic_max_tokens,
+                    timeout_s=settings.anthropic_timeout_s,
+                    retry_policy=retry_policy,
+                ),
+                prompt_supported=True,
+            )
+        )
+
+    logger.info(
+        "[svc2][wiring] Proveedores LLM habilitados: %s",
+        [p.provider for p in providers] or "(ninguno)",
+    )
 
     if settings.google_document_ai_enabled:
         if settings.google_application_credentials:
@@ -181,6 +212,7 @@ def build_app(settings: Settings) -> FastAPI:
                 }
                 for provider in providers
             ],
+            "enabled_llm_providers": settings.enabled_llm_providers,
             "retry_policy": {
                 "max_retries": settings.llm_max_retries,
                 "backoff_base_s": settings.llm_backoff_base_s,

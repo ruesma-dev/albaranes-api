@@ -36,6 +36,7 @@ albaran_factura_es:
     - descuento: si aparece, como número.
     - precio_neto: si figura, léelo; si no, calcula
       cantidad*precio*(1 - descuento/100) cuando sea posible.
+    - Si hay un aviso de que una linea o producto no se ha entregado total o parcialmente, o que esta pendiente de recibir, ignora esas lineas o mediciones (en funcion de si es total o parcial la parte pendiente de la linea)
     
     Código de imputación manuscrito:
       - Es un texto manuscrito SIEMPRE.
