@@ -147,12 +147,9 @@ albaran_factura_es:
 
     **Líneas independientes del mismo vertido** (SÍ van como línea propia):
 
-    - Exceso de tiempo de carga/descarga. Calcula el tiempo NETO
+    - Exceso de tiempo de carga/descarga. Suele venir una de entrada o inicio de carga, y otra de salida. Calcula el tiempo NETO
       como la diferencia entre tiempo total de permanencia del
-      camión y el tiempo máximo libre que indique el albarán
-      (habitualmente 30 min por cada m³ cargado o similar; si el
-      albarán lo indica, úsalo; si no, guarda en notas_tiempo lo
-      que puedas leer y deja la cantidad en null). Unidad habitual:
+      camión y el tiempo máximo libre que indique el albarán. Si la hora de salida no excede la hora de entrada, por tiempo cero. si no existe el campor hora limite o similar, pon en cantidad el valor en minutos del tiempo neto calculado. Unidad habitual:
       'min'. rol_linea='extra_tiempo'.
     - Servicio de bombeo / alquiler de bomba si aparece como
       concepto facturable ("1 ud bomba hormigón"). Unidad 'ud' u
@@ -183,7 +180,7 @@ albaran_factura_es:
             "tipo_familia": "hormigon",
             "rol_linea": "base",
             "descripcion_extendida": "HA-25/B/20/IIa, sulforresistente, árido rodado, con aditivo fluidificante",
-            "notas_tiempo": null,
+            "notas_tiempo": Carga 10:15 descarga 11:28 neto 73min, 0min exceso,
             "ref_linea_base": null
           }
         }
