@@ -5,6 +5,7 @@ from typing import List, Optional
 
 from pydantic import Field
 
+from domain.models.contexto_linea import ContextoLinea
 from domain.models.schema_base import StrictSchemaModel
 
 
@@ -31,6 +32,19 @@ class LineaAlbaran(StrictSchemaModel):
     precio_neto: Optional[float] = None
     codigo_imputacion: Optional[str] = None
     confianza_pct: Optional[float] = Field(default=None, ge=0, le=100)
+
+    # -----------------------------------------------------------------
+    # Bloque opcional con info estructural de la línea (familia
+    # hormigón / combustible / alquiler_maquinaria). Si la línea no
+    # pertenece a una familia compleja, el OCR omite el bloque y llega
+    # como None. Ver domain/models/contexto_linea.py y los prompts V2
+    # para la semántica exacta.
+    #
+    # Nota sobre StrictSchemaModel (extra='forbid'): como el campo está
+    # declarado explícitamente, 'forbid' no lo bloquea. El 'forbid' solo
+    # rechaza campos no declarados en el modelo.
+    # -----------------------------------------------------------------
+    contexto_linea: Optional[ContextoLinea] = None
 
 
 class DocumentoAlbaran(StrictSchemaModel):
