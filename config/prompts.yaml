@@ -39,7 +39,7 @@ albaran_factura_es:
     ## Reglas para la cabecera
 
     - proveedor_nombre: razón social del proveedor (emisor del albarán).
-      Puede venir en el logo, suele estar en la parte superior.
+      Puede venir en el logo, suele estar en la parte superior. Construcciones Ruesma, cuyo CIF es A81873903, somos nosotros la constructora, asi que debes ignorarlo como posible proveedorc.
     - proveedor_cif: CIF/NIF/NIE del proveedor según formato español.
       Busca el código por un campo que ponga CIF o NIF o NIE; si no,
       puede ser un código cerca de la razón social en cabecera.
@@ -48,7 +48,7 @@ albaran_factura_es:
     - forma_pago: 'contado', 'transferencia', '30 días', etc.
     - obra_codigo: código de 4 números que empieza por 0. Puede estar
       escrito a mano, o traer solo los 3 últimos dígitos; normaliza a
-      4 añadiendo el 0 inicial.
+      4 añadiendo el 0 inicial. NUNCA tiene puntos para separar codigo. Si tiene puntos SIEMPRE es un codigo de imputacion.
 
     ## Reglas generales para las líneas
 
@@ -71,6 +71,7 @@ albaran_factura_es:
     ## Código de imputación manuscrito
 
     - Es un texto manuscrito SIEMPRE.
+    - Si tiene un punto separanco codigo alfanumerico SIEMPRE es un codigo de imputacion.
     - Puede estar asociado a una línea por cercanía, raya, flecha o llave.
     - Si solo hay un código claro en todo el documento, se aplica a
       todas las líneas.
