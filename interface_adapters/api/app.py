@@ -1,16 +1,18 @@
 # interface_adapters/api/app.py
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any, Dict, List
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from application.pipelines.extract_albaran_pipeline import (
     ExtractAlbaranPipeline,
     ExtractAlbaranRequest,
+    ReviewAlbaranRequest,
 )
 from application.services.albaran_extraction_service import (
     AlbaranExtractionService,
@@ -45,28 +47,16 @@ def build_app(settings: Settings) -> FastAPI:
     prompt_repo = YamlPromptRepository(settings.prompts_yaml_path)
     schema_registry = SchemaRegistry()
 
-    # Política de reintentos compartida por los tres clientes LLM.
-    # Los proveedores de OCR puro (Google Document AI, Azure Document
-    # Intelligence) no la reciben: ya traen retry interno en sus SDKs
-    # y aplicar otra capa encima duplicaría tiempos sin beneficio.
     retry_policy = RetryPolicy(
         max_retries=settings.llm_max_retries,
         backoff_base_s=settings.llm_backoff_base_s,
         backoff_cap_s=settings.llm_backoff_cap_s,
     )
 
-    # ------------------------------------------------------------------ #
-    # Construcción condicional de proveedores LLM.
-    #
-    # Respetamos las flags ``ENABLE_OPENAI`` / ``ENABLE_GEMINI`` /
-    # ``ENABLE_CLAUDE`` del .env. Si un proveedor está a false, NO se
-    # instancia su cliente — lo que significa que no se llama a su API
-    # al extraer, no se consumen tokens ni cuota. El servicio 3 (merge)
-    # ya trata Gemini/Claude como opcionales; OpenAI sigue siendo
-    # obligatorio porque el pipeline lo exige para poder construir el
-    # envelope (si quisiéramos desactivar OpenAI habría que revisitar
-    # esa decisión — fuera del alcance de este fix).
-    # ------------------------------------------------------------------ #
+    # ----------------------------------------------------------- #
+    # Construcción de proveedores LLM (igual que antes — solo se
+    # instancian los habilitados con flags ENABLE_*).
+    # ----------------------------------------------------------- #
     providers: list[ProviderClientSpec] = []
 
     if settings.openai_enabled:
@@ -109,11 +99,6 @@ def build_app(settings: Settings) -> FastAPI:
                 prompt_supported=True,
             )
         )
-
-    logger.info(
-        "[svc2][wiring] Proveedores LLM habilitados: %s",
-        [p.provider for p in providers] or "(ninguno)",
-    )
 
     if settings.google_document_ai_enabled:
         if settings.google_application_credentials:
@@ -170,20 +155,31 @@ def build_app(settings: Settings) -> FastAPI:
             )
         )
 
+    logger.info(
+        "[svc2][wiring] Proveedores LLM cargados: %s | "
+        "FASE 1=%s · FASE 2=%s",
+        [p.provider for p in providers] or "(ninguno)",
+        settings.ia_primera_fase,
+        settings.ia_segunda_fase,
+    )
+
     extraction_service = AlbaranExtractionService(
         providers=providers,
         prompt_repo=prompt_repo,
         schema_registry=schema_registry,
-        prompt_key=settings.prompt_key,
     )
     pipeline = ExtractAlbaranPipeline(
         extraction_service=extraction_service,
         max_file_mb=settings.max_file_mb,
         service_version=settings.service_version,
+        provider_phase_1=settings.ia_primera_fase,
+        provider_phase_2=settings.ia_segunda_fase,
+        prompt_key_phase_1=settings.prompt_key_fase1,
+        prompt_key_phase_2=settings.prompt_key_fase2,
     )
 
     app = FastAPI(
-        title="Albaranes Extractor API",
+        title="Albaranes Extractor API (2-fase)",
         version=settings.service_version,
     )
 
@@ -204,15 +200,24 @@ def build_app(settings: Settings) -> FastAPI:
             "ok": True,
             "service": "albaranes-extractor-api",
             "version": settings.service_version,
-            "providers": [
+            "providers_loaded": [
                 {
-                    "provider": provider.provider,
-                    "model": provider.model_name,
-                    "prompt_supported": provider.prompt_supported,
+                    "provider": p.provider,
+                    "model": p.model_name,
+                    "prompt_supported": p.prompt_supported,
                 }
-                for provider in providers
+                for p in providers
             ],
-            "enabled_llm_providers": settings.enabled_llm_providers,
+            "phase_routing": {
+                "phase_1": {
+                    "provider": settings.ia_primera_fase,
+                    "prompt_key": settings.prompt_key_fase1,
+                },
+                "phase_2": {
+                    "provider": settings.ia_segunda_fase,
+                    "prompt_key": settings.prompt_key_fase2,
+                },
+            },
             "retry_policy": {
                 "max_retries": settings.llm_max_retries,
                 "backoff_base_s": settings.llm_backoff_base_s,
@@ -220,14 +225,97 @@ def build_app(settings: Settings) -> FastAPI:
             },
         }
 
-    @app.post("/v1/albaranes/extract")
-    async def extract(file: UploadFile = File(...)) -> Dict[str, Any]:
+    # ----------------------------------------------------------- #
+    # POST /v1/albaranes/extract/phase-1
+    # ----------------------------------------------------------- #
+    @app.post("/v1/albaranes/extract/phase-1")
+    async def extract_phase_1(file: UploadFile = File(...)) -> Dict[str, Any]:
         data = await file.read()
         if not data:
             raise HTTPException(status_code=400, detail="Archivo vacío.")
 
         try:
-            return pipeline.run(
+            return pipeline.run_phase_1(
+                ExtractAlbaranRequest(
+                    filename=file.filename or "document.bin",
+                    mime_type=file.content_type or "application/octet-stream",
+                    file_bytes=data,
+                )
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Error en extract_phase_1")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error en fase 1: {exc}",
+            ) from exc
+
+    # ----------------------------------------------------------- #
+    # POST /v1/albaranes/extract/phase-2
+    # Multipart: file (PDF/imagen) + Form phase_1_json (string).
+    # ----------------------------------------------------------- #
+    @app.post("/v1/albaranes/extract/phase-2")
+    async def extract_phase_2(
+        file: UploadFile = File(...),
+        phase_1_json: str = Form(...),
+    ) -> Dict[str, Any]:
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="Archivo vacío.")
+
+        try:
+            phase_1_payload = json.loads(phase_1_json)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"phase_1_json inválido: {exc}",
+            ) from exc
+        if not isinstance(phase_1_payload, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="phase_1_json debe ser un objeto JSON.",
+            )
+
+        try:
+            return pipeline.run_phase_2(
+                ReviewAlbaranRequest(
+                    filename=file.filename or "document.bin",
+                    mime_type=file.content_type or "application/octet-stream",
+                    file_bytes=data,
+                    phase_1_json=phase_1_payload,
+                )
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Error en extract_phase_2")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error en fase 2: {exc}",
+            ) from exc
+
+    # ----------------------------------------------------------- #
+    # POST /v1/albaranes/extract  (LEGACY — alias de phase-1).
+    # Mantiene la compatibilidad con clientes que aún no se han
+    # migrado al endpoint /phase-1. Recomendable retirarlo una vez
+    # toda la cadena esté actualizada.
+    # ----------------------------------------------------------- #
+    @app.post("/v1/albaranes/extract")
+    async def extract_legacy(file: UploadFile = File(...)) -> Dict[str, Any]:
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="Archivo vacío.")
+
+        logger.info(
+            "[svc2][legacy] /v1/albaranes/extract → redirigido a phase_1"
+        )
+        try:
+            return pipeline.run_phase_1(
                 ExtractAlbaranRequest(
                     filename=file.filename or "document.bin",
                     mime_type=file.content_type or "application/octet-stream",
@@ -241,7 +329,7 @@ def build_app(settings: Settings) -> FastAPI:
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
-                detail=f"Error extrayendo albarán: {exc}",
+                detail=f"Error: {exc}",
             ) from exc
 
     return app
