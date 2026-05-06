@@ -1,119 +1,102 @@
 # domain/models/revision_models.py
 """Schema de respuesta de la fase 2 (revisión).
 
-NOTA TÉCNICA SOBRE EL TIPADO DE valor_anterior / valor_propuesto:
+NUEVO ENFOQUE — DICIEMBRE 2026:
 
-OpenAI Structured Outputs (Responses API + response_format) requiere
-que CADA propiedad del schema tenga un ``type`` explícito. No acepta
-``Any`` (que se traduce a un schema vacío {}). Por ese motivo no
-podemos declarar ``valor_anterior: Any``.
+La fase 2 ya NO devuelve una lista de cambios estructurados con valores
+heterogéneos (que obligaba a `Any` y rompía OpenAI Structured Outputs,
+o a `ScalarValue` y rompía la inserción de líneas nuevas).
 
-Para que la API lo acepte, declaramos ``valor_anterior`` y
-``valor_propuesto`` como un union explícito de tipos primitivos
-JSON: ``str | int | float | bool | None``. Esto cubre el 100% de
-los casos reales:
+Ahora la fase 2 devuelve directamente el documento revisado COMPLETO
+con el mismo schema que fase 1 (`DocumentoAlbaran`), más una lista
+de razonamientos textuales (uno por cada cambio que ha hecho).
 
-  - Strings: fechas, CIFs, códigos de obra, descripciones, unidades.
-  - Números (int/float): cantidades, precios, importes.
-  - Booleanos: rara vez, pero posibles en flags futuros.
-  - None: dos usos:
-      a) Valor "no presente" en valor_anterior (la IA no encontró
-         valor previo en fase 1, por ejemplo si propone añadir una
-         línea o un campo nuevo).
-      b) "eliminar" el valor en valor_propuesto. Para eliminar una
-         línea entera, ver la nota más abajo.
+Ventajas del enfoque:
 
-ELIMINAR / AÑADIR LÍNEAS ENTERAS:
+  - Schema idéntico a fase 1 → compatibilidad total con las 3 IAs
+    (Gemini, OpenAI, Claude). Ya está probado en fase 1.
+  - Cero ambigüedad de tipos. Cada campo es lo que es.
+  - Sin código de "patching": el output de fase 2 es el JSON final
+    que se manda a sv3 (sv7 solo hace un diff opcional para marcar
+    `source_phase` en líneas modificadas).
+  - Si la fase 2 quiere añadir una línea, devuelve un objeto
+    LineaAlbaran completo, válido contra el schema. Imposible
+    confundirse.
 
-Como el schema es escalar (no admite objetos anidados), los cambios
-estructurales se hacen GRANULARMENTE:
-
-  - Añadir línea nueva en posición N → la fase 2 emite varios
-    cambios con paths "lines[N].cantidad", "lines[N].precio",
-    "lines[N].concepto", etc. La utilidad apply_patch_to_envelope
-    detecta la primera ocurrencia de "lines[N]" con índice nuevo
-    y crea el dict; las siguientes ocurrencias rellenan campos.
-
-  - Eliminar línea entera N → la fase 2 emite UN cambio con path
-    "lines[N]" (sin sub-campo) y valor_propuesto=null. La utilidad
-    detecta el path "lines[N]" sin sub-segmento y aplica un pop().
-
-Esta política está descrita también en el prompt fase 2 (patrones
-8 y 9).
+Trade-off: la trazabilidad explícita de "qué cambió" se pierde a
+nivel estructurado. Se conserva como texto libre en `razonamientos`,
+y sv7 puede recalcularla por diff si la necesita.
 """
 from __future__ import annotations
 
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Optional
 
 from pydantic import Field
 
+from domain.models.albaran_models import DocumentoAlbaran
 from domain.models.schema_base import StrictSchemaModel
 
 
 ReviewStatus = Literal["ok", "ok_with_changes", "inconsistent"]
 
-# Valor escalar JSON (cubre todos los tipos serializables del
-# ``DocumentoAlbaran``). Usar un Union explícito permite a OpenAI
-# generar un schema con ``anyOf`` válido (cada rama con ``type``).
-ScalarValue = Union[str, int, float, bool, None]
 
+class Razonamiento(StrictSchemaModel):
+    """Justificación textual de un cambio aplicado por la fase 2.
 
-class CambioPropuesto(StrictSchemaModel):
-    """Un cambio puntual propuesto por la fase 2.
-
-    Ejemplos válidos de ``campo``:
-        "fecha"
-        "proveedor_cif"
-        "obra_codigo"
-        "lines[0].cantidad"
-        "lines[2].codigo_imputacion"
-        "lines[3].importe"
-        "lines[5]"            ← eliminar línea (con valor_propuesto=null)
-
-    El sistema aplicará el patch sobre el JSON de fase 1 antes de
-    enviarlo a sv3 para persistir.
+    No contiene valores: solo describe en lenguaje natural qué se
+    cambió y por qué. Los valores reales viven en
+    ``documento_revisado``.
     """
 
     campo: str = Field(
         ...,
         description=(
-            "Ruta del campo en notación dot/bracket. Ej: "
-            "'lines[2].cantidad'. Para eliminar una línea entera "
-            "usar 'lines[N]' (sin sub-campo) con valor_propuesto=null."
+            "Ruta del campo cambiado, en notación dot/bracket. "
+            "Ejemplos: 'cabecera.fecha', 'lineas[0].precio', "
+            "'lineas[3]' (línea entera nueva o eliminada)."
         ),
     )
-    valor_anterior: ScalarValue = Field(
-        default=None,
+    descripcion: str = Field(
+        ...,
         description=(
-            "Valor que tiene fase 1 en ese campo. Sirve de check de "
-            "versión. Si fase 2 propone añadir una línea/campo nuevo, "
-            "puede dejar este campo a null."
+            "Explicación breve del cambio en lenguaje natural. "
+            "Ejemplo: 'Cambiado el precio de 0.0085 a 0.85 porque "
+            "en el albarán se lee claramente 0,85 €/kg en la "
+            "columna PVP de la línea 4.'"
         ),
-    )
-    valor_propuesto: ScalarValue = Field(
-        default=None,
-        description=(
-            "Valor que la fase 2 propone. null tiene dos significados: "
-            "(a) si el path es 'lines[N]' sin sub-campo, eliminar esa "
-            "línea; (b) en otro caso, dejar el valor sin definir."
-        ),
-    )
-    razon: Optional[str] = Field(
-        default=None,
-        description="Por qué se propone el cambio. Específica, no genérica.",
     )
     patron_aplicado: Optional[str] = Field(
         default=None,
         description=(
-            "Identificador corto del patrón disparado, p.ej. 'importe_minimo', "
-            "'logica_fisica_unidades', 'coherencia_aritmetica_linea'. "
-            "Opcional: la IA puede omitirlo si el cambio no encaja en un patrón."
+            "Identificador de la regla de revision_rules.yaml que "
+            "disparó el cambio. Ejemplo: 'importe_minimo'. "
+            "Opcional: si el cambio no encaja en ninguna regla, "
+            "déjalo vacío."
         ),
     )
 
 
 class RevisionAlbaranFase2(StrictSchemaModel):
-    """Respuesta completa de la fase 2."""
+    """Respuesta completa de la fase 2.
+
+    review_status:
+      - 'ok': no se ha cambiado nada. ``documento_revisado`` igual al
+        de fase 1.
+      - 'ok_with_changes': se ha cambiado al menos un campo. Mira
+        ``razonamientos`` para ver qué.
+      - 'inconsistent': el documento parece ilegible o contradictorio.
+        ``documento_revisado`` puede contener el mejor intento de
+        corrección, pero el revisor humano debe verificar.
+
+    documento_revisado:
+      JSON completo con el mismo schema que fase 1
+      (DocumentoAlbaran). Si no había nada que cambiar, es idéntico
+      al input.
+
+    razonamientos:
+      Lista (puede estar vacía si review_status == 'ok'). Una entrada
+      por cada cambio aplicado.
+    """
 
     review_status: ReviewStatus = Field(
         ...,
@@ -121,9 +104,23 @@ class RevisionAlbaranFase2(StrictSchemaModel):
     )
     explicacion_global: Optional[str] = Field(
         default=None,
-        description="Resumen 1-3 frases del diagnóstico de la fase 2.",
+        description=(
+            "Resumen 1-3 frases del diagnóstico. Si 'ok', describe "
+            "brevemente qué se validó. Si 'ok_with_changes', resume "
+            "el tipo de errores. Si 'inconsistent', explica por qué."
+        ),
     )
-    cambios: List[CambioPropuesto] = Field(
+    documento_revisado: DocumentoAlbaran = Field(
+        ...,
+        description=(
+            "Documento corregido completo, con el mismo schema que "
+            "fase 1. Si no hubo cambios, idéntico al de fase 1."
+        ),
+    )
+    razonamientos: List[Razonamiento] = Field(
         default_factory=list,
-        description="Lista de cambios puntuales (vacía si review_status == 'ok').",
+        description=(
+            "Lista de cambios realizados. Vacía si review_status="
+            "'ok'. Una entrada por cada campo modificado."
+        ),
     )

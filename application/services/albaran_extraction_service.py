@@ -28,6 +28,9 @@ from application.services.schema_registry import SchemaRegistry
 from domain.models.llm_attachment import LlmAttachment
 from domain.ports.llm_client import LlmVisionClient
 from domain.ports.prompt_repository import PromptRepository
+from infrastructure.prompts.revision_rules_repository import (
+    RevisionRulesRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,12 +69,19 @@ class AlbaranExtractionService:
         providers: Iterable[ProviderClientSpec],
         prompt_repo: PromptRepository,
         schema_registry: SchemaRegistry,
+        revision_rules_repo: RevisionRulesRepository,
+        prompt_key_phase_1: str,
     ) -> None:
         self._providers_by_name: Dict[str, ProviderClientSpec] = {
             spec.provider: spec for spec in providers
         }
         self._prompts = prompt_repo
         self._schemas = schema_registry
+        self._revision_rules_repo = revision_rules_repo
+        # Necesitamos saber qué prompt usó la fase 1 para poderlo
+        # incrustar en las instructions de la fase 2. Lo recibe el
+        # servicio en construcción (lo lee app.py de settings).
+        self._prompt_key_phase_1 = prompt_key_phase_1
 
     # ---------------------------------------------------------- #
     # FASE 1 — extracción inicial.
@@ -122,32 +132,80 @@ class AlbaranExtractionService:
         prompt_key: str,
         phase_1_json: dict,
     ) -> ProviderExtractionResult:
+        """Ejecuta la revisión de fase 2.
+
+        El prompt de fase 2 (config/prompts.yaml → albaran_revision_fase2_es)
+        contiene 3 placeholders en su ``task``:
+          - {prompt_fase_1}: el system+task del prompt de fase 1, para
+            que la IA conozca las reglas que se siguieron en la
+            extracción.
+          - {revision_rules}: la checklist de patrones conocidos
+            cargada de config/revision_rules.yaml.
+          - {json_fase_1}: el JSON producido por la fase 1, para que
+            la IA lo compare con el PDF y devuelva el documento
+            corregido.
+
+        Aquí los renderizamos antes de construir las instructions
+        finales del LLM. El ``user_text`` queda mínimo (la "carne"
+        de la petición ya está en las instructions).
+        """
         spec = self._require_provider(provider)
         prompt_spec = self._prompts.get(prompt_key)
         response_model = self._schemas.get(prompt_spec.schema)
 
-        instructions = self._build_instructions(prompt_spec)
+        # -- Cargar contenidos para los placeholders -- #
+        # El prompt_key_phase_1 lo recibimos en el constructor (lo
+        # lee app.py de settings.prompt_key_fase1) — así no obligamos
+        # al pipeline a pasarlo en cada llamada y mantenemos la firma
+        # simple.
+        prompt_fase_1_spec = self._prompts.get(self._prompt_key_phase_1)
+        prompt_fase_1_text = self._build_instructions(prompt_fase_1_spec)
+        revision_rules_text = self._revision_rules_repo.render_for_prompt()
+        json_fase_1_text = json.dumps(
+            phase_1_json, ensure_ascii=False, indent=2,
+        )
 
-        # El user_text de fase 2 lleva el JSON de fase 1 EMBEBIDO
-        # como contexto. La imagen del adjunto se pasa por el
-        # mecanismo nativo del proveedor (igual que en fase 1).
-        json_str = json.dumps(phase_1_json, ensure_ascii=False, indent=2)
+        # -- Renderizar el task de fase 2 con sus placeholders -- #
+        # IMPORTANTE: usamos str.replace en vez de .format() porque
+        # el task contiene llaves de ejemplos JSON ("{...}") que
+        # romperían el .format(). replace() es más robusto.
+        task_rendered = prompt_spec.task
+        task_rendered = task_rendered.replace(
+            "{prompt_fase_1}", prompt_fase_1_text,
+        )
+        task_rendered = task_rendered.replace(
+            "{revision_rules}", revision_rules_text,
+        )
+        task_rendered = task_rendered.replace(
+            "{json_fase_1}", json_fase_1_text,
+        )
+
+        # Reconstruimos el spec con el task renderizado (sin tocar el
+        # original — Python hace inmutables nuestras instancias en
+        # caliente, pero por seguridad clonamos con namedtuple-like).
+        instructions = self._compose_instructions(
+            system=prompt_spec.system,
+            task=task_rendered,
+            schema_hint=prompt_spec.schema_hint,
+        )
+
         user_text = (
-            "Documento adjunto: la imagen / PDF original del albarán.\n\n"
-            "JSON producido por la fase 1 (extracción inicial):\n"
-            "```json\n"
-            f"{json_str}\n"
-            "```\n\n"
-            "Tu tarea: revisar el JSON contra la imagen siguiendo los "
-            "patrones definidos en el prompt y devolver un PATCH con "
-            "los cambios que propones."
+            "Documento adjunto: PDF original del albarán.\n\n"
+            "El JSON de fase 1 a revisar y la checklist de reglas ya "
+            "están en las instrucciones del sistema. Tu tarea: "
+            "comparar el PDF con el JSON, aplicar la checklist y "
+            "devolver el documento corregido completo (mismo schema "
+            "que fase 1) más los razonamientos de cada cambio."
         )
 
         logger.info(
             "Revisión FASE 2 proveedor=%s prompt_key=%s schema=%s "
-            "model=%s filename=%s json_fase1_chars=%d",
+            "model=%s filename=%s json_fase1_chars=%d "
+            "rules_count=%d",
             spec.provider, prompt_key, prompt_spec.schema,
-            spec.model_name, attachment.filename, len(json_str),
+            spec.model_name, attachment.filename,
+            len(json_fase_1_text),
+            self._revision_rules_repo.count,
         )
 
         return self._invoke_provider(
@@ -159,7 +217,11 @@ class AlbaranExtractionService:
             schema_name=prompt_spec.schema,
             prompt_key=prompt_key,
             phase_label="phase_2",
-            extra_debug={"phase_1_json": phase_1_json},
+            extra_debug={
+                "phase_1_json": phase_1_json,
+                "revision_rules_count": self._revision_rules_repo.count,
+                "revision_rules_ids": self._revision_rules_repo.rule_ids,
+            },
         )
 
     # ---------------------------------------------------------- #
@@ -181,7 +243,25 @@ class AlbaranExtractionService:
         # Concatenamos system + task + schema_hint para el system prompt
         # del proveedor (como hacía la versión anterior). Cada provider
         # client decidirá cómo lo distribuye en su API concreta.
-        parts = [prompt_spec.system, prompt_spec.task, prompt_spec.schema_hint]
+        return AlbaranExtractionService._compose_instructions(
+            system=prompt_spec.system,
+            task=prompt_spec.task,
+            schema_hint=prompt_spec.schema_hint,
+        )
+
+    @staticmethod
+    def _compose_instructions(
+        *,
+        system: str | None,
+        task: str | None,
+        schema_hint: str | None,
+    ) -> str:
+        """Versión que acepta strings ya renderizados.
+
+        Útil cuando el ``task`` lleva placeholders que se han
+        sustituido externamente (como en review_phase_2).
+        """
+        parts = [system, task, schema_hint]
         return "\n\n".join(p for p in parts if p)
 
     def _invoke_provider(
