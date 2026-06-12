@@ -302,12 +302,22 @@ def build_app(settings: Settings) -> FastAPI:
 
     # ----------------------------------------------------------- #
     # POST /v1/albaranes/extract/phase-2
-    # Multipart: file (PDF/imagen) + Form phase_1_json (string).
+    # Multipart: file (PDF/imagen) + Form phase_1_json (string)
+    #            [+ Form sigrid_context_json (string, opcional)].
+    #
+    # sigrid_context_json (jun 2026): grounding determinista de la
+    # cabecera contra Sigrid generado por sv3 y reenviado por sv7.
+    # Si llega, se inyecta en el prompt de fase 2 para que la IA:
+    #   - NO toque los bloques ya validados por CIF/código.
+    #   - Use las listas de candidatos del ERP para casar lo no
+    #     validado (nombre proveedor / obra leídos con OCR).
+    # Si no llega (o es inválido), la fase 2 funciona como siempre.
     # ----------------------------------------------------------- #
     @app.post("/v1/albaranes/extract/phase-2")
     async def extract_phase_2(
         file: UploadFile = File(...),
         phase_1_json: str = Form(...),
+        sigrid_context_json: str = Form(""),
     ) -> Dict[str, Any]:
         data = await file.read()
         if not data:
@@ -326,6 +336,26 @@ def build_app(settings: Settings) -> FastAPI:
                 detail="phase_1_json debe ser un objeto JSON.",
             )
 
+        sigrid_context: Dict[str, Any] | None = None
+        raw_ctx = (sigrid_context_json or "").strip()
+        if raw_ctx:
+            try:
+                parsed_ctx = json.loads(raw_ctx)
+                if isinstance(parsed_ctx, dict):
+                    sigrid_context = parsed_ctx
+                else:
+                    logger.warning(
+                        "[svc2] sigrid_context_json no es objeto JSON; "
+                        "se ignora (fase 2 sin grounding)."
+                    )
+            except Exception:
+                # Best-effort: un contexto malformado NUNCA rompe la
+                # fase 2 — solo se pierde el grounding.
+                logger.warning(
+                    "[svc2] sigrid_context_json inválido; se ignora "
+                    "(fase 2 sin grounding)."
+                )
+
         try:
             return pipeline.run_phase_2(
                 ReviewAlbaranRequest(
@@ -333,6 +363,7 @@ def build_app(settings: Settings) -> FastAPI:
                     mime_type=file.content_type or "application/octet-stream",
                     file_bytes=data,
                     phase_1_json=phase_1_payload,
+                    sigrid_context=sigrid_context,
                 )
             )
         except KeyError as exc:

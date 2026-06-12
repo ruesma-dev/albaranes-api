@@ -131,11 +131,12 @@ class AlbaranExtractionService:
         provider: str,
         prompt_key: str,
         phase_1_json: dict,
+        sigrid_context: dict | None = None,
     ) -> ProviderExtractionResult:
         """Ejecuta la revisión de fase 2.
 
         El prompt de fase 2 (config/prompts.yaml → albaran_revision_fase2_es)
-        contiene 3 placeholders en su ``task``:
+        contiene 4 placeholders en su ``task``:
           - {prompt_fase_1}: el system+task del prompt de fase 1, para
             que la IA conozca las reglas que se siguieron en la
             extracción.
@@ -144,6 +145,10 @@ class AlbaranExtractionService:
           - {json_fase_1}: el JSON producido por la fase 1, para que
             la IA lo compare con el PDF y devuelva el documento
             corregido.
+          - {sigrid_context}: (jun 2026) bloque de grounding contra el
+            ERP. Si ``sigrid_context`` es None, el placeholder se
+            sustituye por una nota de "no disponible" y la fase 2 se
+            comporta exactamente como antes.
 
         Aquí los renderizamos antes de construir las instructions
         finales del LLM. El ``user_text`` queda mínimo (la "carne"
@@ -164,6 +169,7 @@ class AlbaranExtractionService:
         json_fase_1_text = json.dumps(
             phase_1_json, ensure_ascii=False, indent=2,
         )
+        sigrid_context_text = self._render_sigrid_context(sigrid_context)
 
         # -- Renderizar el task de fase 2 con sus placeholders -- #
         # IMPORTANTE: usamos str.replace en vez de .format() porque
@@ -179,6 +185,17 @@ class AlbaranExtractionService:
         task_rendered = task_rendered.replace(
             "{json_fase_1}", json_fase_1_text,
         )
+        # Compatibilidad: si el prompts.yaml desplegado aún no tiene el
+        # placeholder {sigrid_context}, el bloque se APPENDEA al final
+        # del task (mejor inyectarlo en posición subóptima que perderlo).
+        if "{sigrid_context}" in task_rendered:
+            task_rendered = task_rendered.replace(
+                "{sigrid_context}", sigrid_context_text,
+            )
+        elif sigrid_context is not None:
+            task_rendered = (
+                f"{task_rendered}\n\n{sigrid_context_text}"
+            )
 
         # Reconstruimos el spec con el task renderizado (sin tocar el
         # original — Python hace inmutables nuestras instancias en
@@ -201,11 +218,12 @@ class AlbaranExtractionService:
         logger.info(
             "Revisión FASE 2 proveedor=%s prompt_key=%s schema=%s "
             "model=%s filename=%s json_fase1_chars=%d "
-            "rules_count=%d",
+            "rules_count=%d sigrid_grounding=%s",
             spec.provider, prompt_key, prompt_spec.schema,
             spec.model_name, attachment.filename,
             len(json_fase_1_text),
             self._revision_rules_repo.count,
+            "SI" if sigrid_context is not None else "NO",
         )
 
         return self._invoke_provider(
@@ -221,8 +239,134 @@ class AlbaranExtractionService:
                 "phase_1_json": phase_1_json,
                 "revision_rules_count": self._revision_rules_repo.count,
                 "revision_rules_ids": self._revision_rules_repo.rule_ids,
+                "sigrid_context": sigrid_context,
             },
         )
+
+    @staticmethod
+    def _render_sigrid_context(sigrid_context: dict | None) -> str:
+        """Construye el bloque de texto del grounding para el prompt.
+
+        Estructura esperada (generada por sv3 HeaderGroundingService):
+          { "proveedor": {status, cif, nombre_canonico, ...},
+            "obra": {status, codigo, nombre, direccion, ...},
+            "obras_candidatas": [{codigo, nombre}, ...],
+            "proveedores_candidatos": [{cif, nombre}, ...] }
+
+        Reglas que se trasladan a la IA:
+          - Bloque VALIDADO (CIF/código existen en el ERP) → NO revisar
+            esos campos; copiar los valores canónicos tal cual.
+          - Bloque NO validado → revisarlo usando los candidatos: si el
+            texto leído casa claramente con un candidato (p.ej. mismo
+            nombre con erratas de OCR), corregir nombre/código/CIF con
+            los del candidato y registrar el razonamiento con
+            patron_aplicado='sigrid_grounding'.
+        """
+        if sigrid_context is None:
+            return (
+                "(Grounding Sigrid no disponible en esta ejecución: "
+                "revisa la cabecera solo contra el PDF, como siempre.)"
+            )
+
+        proveedor = sigrid_context.get("proveedor") or {}
+        obra = sigrid_context.get("obra") or {}
+        obras_cand = sigrid_context.get("obras_candidatas") or []
+        provs_cand = sigrid_context.get("proveedores_candidatos") or []
+
+        lines: list[str] = []
+        lines.append(
+            "Validación DETERMINISTA contra el ERP Sigrid (fuente de "
+            "verdad de proveedores y obras de Construcciones Ruesma):"
+        )
+        lines.append("")
+
+        # ---- Proveedor -------------------------------------------- #
+        if proveedor.get("status") == "validated":
+            lines.append(
+                "PROVEEDOR — VALIDADO POR CIF (no lo revises): el CIF "
+                f"{proveedor.get('cif')} existe en el ERP. En "
+                "documento_revisado escribe EXACTAMENTE: "
+                f"proveedor_cif={proveedor.get('cif')!r} y "
+                f"proveedor_nombre={proveedor.get('nombre_canonico')!r}. "
+                "NO añadas razonamientos sobre el proveedor aunque el "
+                "PDF muestre una variante del nombre."
+            )
+        elif proveedor.get("status") == "not_found":
+            lines.append(
+                "PROVEEDOR — el CIF leído "
+                f"({proveedor.get('cif_leido')!r}) NO existe en el ERP. "
+                "REVÍSALO: probablemente hay un error de OCR en el CIF "
+                "o en el nombre. Usa la lista de PROVEEDORES CANDIDATOS "
+                "de más abajo: si el nombre leído "
+                f"({proveedor.get('nombre_leido')!r}) casa claramente "
+                "con un candidato, corrige proveedor_cif y "
+                "proveedor_nombre con los del candidato y añade un "
+                "razonamiento con patron_aplicado='sigrid_grounding'. "
+                "Si ningún candidato casa con claridad, deja los "
+                "valores de fase 1."
+            )
+        else:
+            lines.append(
+                "PROVEEDOR — sin CIF utilizable en fase 1. Si la lista "
+                "de PROVEEDORES CANDIDATOS contiene uno que case "
+                "claramente con el nombre del PDF, usa su cif y nombre "
+                "(patron_aplicado='sigrid_grounding'); si no, deja lo "
+                "de fase 1."
+            )
+        lines.append("")
+
+        # ---- Obra -------------------------------------------------- #
+        if obra.get("status") == "validated":
+            lines.append(
+                "OBRA — VALIDADA POR CÓDIGO (no la revises): el código "
+                f"{obra.get('codigo')} existe en el ERP. En "
+                "documento_revisado escribe EXACTAMENTE: "
+                f"obra_codigo={obra.get('codigo')!r}, "
+                f"obra_nombre={obra.get('nombre')!r} y "
+                f"obra_direccion={obra.get('direccion')!r}."
+            )
+        elif obra.get("status") == "not_found":
+            lines.append(
+                "OBRA — el código leído "
+                f"({obra.get('codigo_leido')!r}) NO existe en el ERP. "
+                "REVÍSALA con la lista de OBRAS CANDIDATAS: si el "
+                "nombre/dirección del PDF casa claramente con una "
+                "candidata, corrige obra_codigo y obra_nombre con los "
+                "de la candidata (patron_aplicado='sigrid_grounding'). "
+                "Si no hay coincidencia clara, deja lo de fase 1."
+            )
+        else:
+            lines.append(
+                "OBRA — sin código utilizable en fase 1. Si una OBRA "
+                "CANDIDATA casa claramente con el nombre/dirección del "
+                "PDF, usa su código y nombre "
+                "(patron_aplicado='sigrid_grounding'); si no, deja lo "
+                "de fase 1."
+            )
+        lines.append("")
+
+        # ---- Candidatos (solo si los hay) -------------------------- #
+        if provs_cand:
+            lines.append("PROVEEDORES CANDIDATOS (cif — nombre):")
+            for item in provs_cand:
+                lines.append(
+                    f"  - {item.get('cif')} — {item.get('nombre')}"
+                )
+            lines.append("")
+        if obras_cand:
+            lines.append("OBRAS CANDIDATAS (codigo — nombre):")
+            for item in obras_cand:
+                lines.append(
+                    f"  - {item.get('codigo')} — {item.get('nombre')}"
+                )
+            lines.append("")
+
+        lines.append(
+            "Recuerda: el grounding SOLO afecta a la cabecera "
+            "(proveedor/obra). Las líneas del albarán se revisan con "
+            "las reglas y la checklist habituales."
+        )
+        return "\n".join(lines)
 
     # ---------------------------------------------------------- #
     # Helpers internos.

@@ -342,6 +342,11 @@ albaran_factura_es:
 #   {prompt_fase_1}    → el system+task del prompt fase 1 entero
 #   {revision_rules}   → la checklist renderizada de revision_rules.yaml
 #   {json_fase_1}      → el JSON que produjo fase 1, indentado
+#   {sigrid_context}   → grounding determinista contra Sigrid (jun 2026):
+#                        proveedor validado por CIF / obra por código +
+#                        candidatos del ERP para lo no validado. Si sv7
+#                        no manda contexto, se sustituye por una nota
+#                        de "no disponible" y la fase 2 actúa como antes.
 # =====================================================================
 albaran_revision_fase2_es:
   system: >
@@ -427,6 +432,16 @@ albaran_revision_fase2_es:
     patron_aplicado correspondiente.
 
     {revision_rules}
+
+    ## GROUNDING CONTRA EL ERP SIGRID (cabecera)
+
+    Validación determinista de proveedor (por CIF) y obra (por
+    código) contra el ERP, con candidatos para lo no validado.
+    Estas instrucciones MANDAN sobre cualquier otra regla de la
+    cabecera: lo VALIDADO se copia tal cual y NO se revisa; lo NO
+    validado se intenta casar con los candidatos del ERP.
+
+    {sigrid_context}
 
     ## JSON DE FASE 1 A REVISAR
 

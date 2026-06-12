@@ -46,6 +46,10 @@ class ReviewAlbaranRequest:
     mime_type: str
     file_bytes: bytes
     phase_1_json: dict
+    # Grounding determinista de cabecera contra Sigrid (jun 2026).
+    # Lo genera sv3 (POST /v1/sigrid/header-grounding), lo reenvía sv7
+    # y aquí se inyecta en el prompt de fase 2. None → fase 2 clásica.
+    sigrid_context: dict | None = None
 
 
 class ExtractAlbaranPipeline:
@@ -104,6 +108,7 @@ class ExtractAlbaranPipeline:
             provider=self._provider_phase_2,
             prompt_key=self._prompt_key_phase_2,
             phase_1_json=request.phase_1_json,
+            sigrid_context=request.sigrid_context,
         )
         sha256 = hashlib.sha256(request.file_bytes).hexdigest()
         return self._envelope_block(
