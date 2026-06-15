@@ -1,23 +1,10 @@
 # domain/ports/llm_client.py
-from __future__ import annotations
+"""Reexport — la implementación canónica vive en ruesma-albaranes-comun.
 
-from abc import ABC, abstractmethod
-from typing import Type
+Este módulo se conserva como reexport para que TODOS los imports del
+servicio sigan funcionando sin tocar más ficheros, eliminando a la vez
+la copia local divergente. Requiere: pip install -e ../comun
+"""
+from ruesma_comun.llm.llm_client import LlmVisionClient
 
-from pydantic import BaseModel
-
-from domain.models.llm_attachment import LlmAttachment
-
-
-class LlmVisionClient(ABC):
-    @abstractmethod
-    def extract_document(
-        self,
-        *,
-        model: str,
-        instructions: str,
-        user_text: str,
-        attachment: LlmAttachment,
-        response_model: Type[BaseModel],
-    ) -> BaseModel:
-        raise NotImplementedError
+__all__ = ["LlmVisionClient"]

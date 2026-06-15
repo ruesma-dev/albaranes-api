@@ -131,6 +131,14 @@ def build_app(settings: Settings) -> FastAPI:
                     timeout_s=settings.anthropic_timeout_s,
                     retry_policy=retry_policy,
                     call_logger=call_logger,
+                    # El cliente canónico (ruesma-albaranes-comun) es
+                    # compartido con sv5: cada servicio fija su tool.
+                    tool_name="emit_albaran_extraction",
+                    tool_description=(
+                        "Devuelve la extracción estructurada del albarán/factura "
+                        "conforme al esquema exigido. Debes llamar SIEMPRE a esta "
+                        "herramienta y solo a ella."
+                    ),
                 ),
                 prompt_supported=True,
             )
