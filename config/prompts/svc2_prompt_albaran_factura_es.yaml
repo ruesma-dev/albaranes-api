@@ -97,10 +97,14 @@ schema_hint: |
     - combustible: gasóleo, gasolina, biodiesel.
     - alquiler_maquinaria: grúas, dumpers, compresores, etc. con tarifa
       por tiempo.
+    - residuos: gestión/traslado de residuos (RCD). Documento de control
+      con códigos LER. La SOLA PRESENCIA de un código LER de 6 dígitos
+      (p.ej. "17 05 04") hace que la línea sea de residuos.
 
   Campos del bloque:
 
-    tipo_familia: 'hormigon' | 'combustible' | 'alquiler_maquinaria'.
+    tipo_familia: 'hormigon' | 'combustible' | 'alquiler_maquinaria'
+                  | 'residuos'.
 
     rol_linea: rol de la línea dentro de su familia:
       - 'base': la línea del producto en sí (ej. "HORMIGÓN HA-25 10 m3").
@@ -130,6 +134,16 @@ schema_hint: |
     ref_linea_base: para líneas complementarias DECLARADAS en el albarán
       (caso raro), el line_index de la base a la que pertenecen. Null
       para líneas base o independientes.
+
+    -- Campos SOLO para residuos (tipo_familia='residuos') --
+    codigo_ler: el código LER de 6 dígitos del residuo, SIN espacios ni
+      puntos (p.ej. "170504", "170203"). Cópialo del documento. Si una
+      fila del documento de residuos tiene un LER, RELLENA contexto_linea
+      con tipo_familia='residuos' y este código.
+    volumen_m3: volumen del residuo en m³ si aparece (número). Null si no.
+    peso_toneladas: peso del residuo en toneladas si aparece. Null si no.
+    En residuos, extrae m³ y Tn POR SEPARADO (no los mezcles); si solo
+    aparece uno, rellena ese y deja el otro null.
 
   ---------------------------------------------------------------------
   EJEMPLO HORMIGÓN (líneas únicas con contexto enriquecido)
