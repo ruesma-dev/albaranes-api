@@ -23,6 +23,7 @@ from enum import Enum
 class Tipologia(str, Enum):
     GENERICO = "generico"
     HORMIGON = "hormigon"
+    MORTERO = "mortero"
     RESIDUOS = "residuos"
 
     @classmethod
@@ -51,6 +52,34 @@ def normalizar_ler(texto: str | None) -> str | None:
         return None
     solo_digitos = re.sub(r"\D", "", m.group(0))
     return solo_digitos if len(solo_digitos) == 6 else None
+
+
+# Designaciones de hormigón estructural/no estructural según EHE:
+# HA (armado), HM (masa), HL (limpieza), HNE (no estructural), seguidas
+# de la resistencia (HA-25, HM20, HL-150, HNE-15...). Sirve para detectar
+# la tipología 'hormigon' desde el código/concepto de la línea sin
+# depender de que la IA rellene contexto_linea.
+_HORMIGON_REGEX = re.compile(r"\bH[ALMN]E?\s?-?\s?\d{2,3}\b", re.IGNORECASE)
+
+
+# Designaciones de MORTERO segun resistencia (M-5, M-7,5, M-10, M-12,5,
+# M-15, M-20...). El prefijo es 'M-' + resistencia; se distingue del
+# hormigon (H*) por la letra. Tambien vale la palabra "mortero".
+_MORTERO_REGEX = re.compile(r"\bM-\s?\d{1,2}(?:[.,]\d)?\b", re.IGNORECASE)
+
+
+def texto_contiene_mortero(texto: str | None) -> bool:
+    """True si el texto contiene una designacion de mortero (M-5, M-7,5)
+    o la palabra 'mortero'."""
+    if not texto:
+        return False
+    t = str(texto)
+    return bool(_MORTERO_REGEX.search(t)) or "mortero" in t.lower()
+
+
+def texto_contiene_hormigon(texto: str | None) -> bool:
+    """True si el texto contiene una designación de hormigón (HA-25, HM20...)."""
+    return bool(_HORMIGON_REGEX.search(str(texto))) if texto else False
 
 
 def texto_contiene_ler(texto: str | None) -> bool:

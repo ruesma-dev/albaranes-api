@@ -16,7 +16,6 @@ Variables de entorno relevantes:
   - BLOBS_CONNECTION_STRING (o, en su defecto, COLAS_CONNECTION_STRING) para
     el Blob; en la nube, BLOBS_ACCOUNT_URL. En local con Azurite basta con
     COLAS_CONNECTION_STRING: el BlobEndpoint se deriva solo.
-  - WORKER_CON_FASE2 : "true" para ejecutar también fase 2 (default false).
   + todas las de sv2 (ENABLE_*, claves IA, prompts...) que usa build_pipeline.
 """
 from __future__ import annotations
@@ -57,7 +56,6 @@ def main() -> int:
     # El SDK de azure-storage-* loguea cada petición HTTP a INFO: a WARNING.
     logging.getLogger("azure").setLevel(logging.WARNING)
 
-    con_fase2 = os.environ.get("WORKER_CON_FASE2", "false").lower() == "true"
 
     almacen = construir_almacen_desde_entorno()
     pipeline = build_pipeline(settings)
@@ -68,7 +66,6 @@ def main() -> int:
         grounding=GroundingNulo(),
         sumidero=SumideroEnvelopeBlob(almacen),
         publicador=publicador,
-        con_fase2=con_fase2,
     )
     return ejecutar_worker(
         nombre_cola=COLA_EXTRACCION,

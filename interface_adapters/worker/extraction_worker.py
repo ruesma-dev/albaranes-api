@@ -6,7 +6,7 @@ Sustituye al endpoint HTTP como entrada de sv2 en el modelo de colas. Recibe
 extracción REAL de sv2 y publica el disparador de persistencia. El envelope se
 persiste (SumideroEnvelope) para que sv3 lo recupere por document_id.
 
-Piloto: por defecto ejecuta SOLO fase 1 (``con_fase2=False``). Fase 2 +
+Ejecuta SIEMPRE fase 1 + fase 2 (extraccion + revision/extraccion especial).
 grounding se activan cuando exista el adaptador de grounding (se mueve aquí
 desde sv3); el esqueleto ya está listo.
 """
@@ -44,7 +44,6 @@ def construir_handler_extraccion(
     grounding: GroundingCabecera,
     sumidero: SumideroEnvelope,
     publicador: PublicadorColas,
-    con_fase2: bool = False,
 ) -> Callable[[MensajeBase], None]:
     """Crea el handler (closure) que consume q-extraccion."""
 
@@ -69,31 +68,33 @@ def construir_handler_extraccion(
         # regla dura LER -> residuos, familia dominante, u override por CIF.
         tip = resolver_tipologia(env1.get("data") or {})
 
-        # 3) Fase 2 — revision + extraccion particular (opcional en el piloto).
-        env2 = None
-        if con_fase2:
-            ctx = grounding.contexto(
-                document_id=document_id, phase_1_json=env1
+        # 3) Fase 2 — revision + extraccion particular (SIEMPRE). El esquema
+        #    de 4 IAs deja la extraccion especial (hormigon/residuos) en la
+        #    fase 2, asi que ya no es opcional.
+        ctx = grounding.contexto(
+            document_id=document_id, phase_1_json=env1
+        )
+        env2 = pipeline.run_phase_2(
+            ReviewAlbaranRequest(
+                filename=doc.filename,
+                mime_type=doc.mime_type,
+                file_bytes=doc.file_bytes,
+                phase_1_json=env1,
+                sigrid_context=ctx,
+                # Fase 2 por tipología: el pipeline usa este prompt si
+                # existe (albaran_revision_fase2_{generico|hormigon|
+                # residuos}); si no, cae al genérico configurado.
+                prompt_key=f"albaran_revision_fase2_{tip.tipologia.value}",
             )
-            env2 = pipeline.run_phase_2(
-                ReviewAlbaranRequest(
-                    filename=doc.filename,
-                    mime_type=doc.mime_type,
-                    file_bytes=doc.file_bytes,
-                    phase_1_json=env1,
-                    sigrid_context=ctx,
-                )
-            )
-            sumidero.persistir(
-                document_id=document_id, envelope=env2, fase="phase_2"
-            )
+        )
+        sumidero.persistir(
+            document_id=document_id, envelope=env2, fase="phase_2"
+        )
 
-        # 4) Envelope FINAL: fusiona fase 2 (si la hubo) y sella la tipologia.
-        #    Es el que consume sv3 (fase logica "phase_1"). Con con_fase2=False
-        #    el documento es el de fase 1 tal cual; solo se anade tipologia en
-        #    meta (sv3 lee meta de forma laxa, no rompe el parseo estricto de
-        #    data). El detalle de residuos (LER/m3/Tn/familia) viaja dentro de
-        #    contexto_linea, que sv3 guarda como JSON.
+        # 4) Envelope FINAL: fusiona fase 2 y sella la tipologia. Es el que
+        #    consume sv3 (fase logica "phase_1"). La tipologia va en meta (sv3
+        #    la lee de forma laxa); el detalle de residuos/hormigon
+        #    (contexto_linea) viaja dentro de data, y sv3 lo guarda como JSON.
         envelope_final = construir_envelope_final(
             env_fase1=env1, env_fase2=env2, tipologia=tip.tipologia,
         )
@@ -113,7 +114,7 @@ def construir_handler_extraccion(
             "[sv2-worker] document_id=%s OK tipologia=%s fase=%s -> q-persistencia",
             document_id,
             tip.tipologia.value,
-            "phase_2" if con_fase2 else "phase_1",
+            "phase_2",
         )
         # Si el handler lanza, el mensaje NO se borra: reaparece por
         # visibilidad y se reintenta (lo gestiona ConsumidorCola).

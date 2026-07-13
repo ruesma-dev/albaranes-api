@@ -86,6 +86,11 @@ class AlbaranExtractionService:
     # ---------------------------------------------------------- #
     # FASE 1 — extracción inicial.
     # ---------------------------------------------------------- #
+    def has_prompt(self, prompt_key: str) -> bool:
+        """True si existe esa clave de prompt (para elegir por tipología
+        con fallback al genérico)."""
+        return self._prompts.has(prompt_key)
+
     def extract_phase_1(
         self,
         *,

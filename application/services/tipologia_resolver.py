@@ -28,7 +28,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Mapping
 
-from domain.models.tipologia import Tipologia, texto_contiene_ler
+from domain.models.tipologia import (
+    Tipologia,
+    texto_contiene_hormigon,
+    texto_contiene_ler,
+    texto_contiene_mortero,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +69,33 @@ def _hay_ler_en_linea(linea: dict) -> bool:
     return (
         texto_contiene_ler(linea.get("codigo"))
         or texto_contiene_ler(linea.get("concepto"))
+    )
+
+
+def _hay_mortero_en_linea(linea: dict) -> bool:
+    ctx = linea.get("contexto_linea")
+    if isinstance(ctx, dict):
+        if str(ctx.get("tipo_familia") or "").strip().lower() == "mortero":
+            return True
+        if texto_contiene_mortero(ctx.get("descripcion_extendida")):
+            return True
+    return (
+        texto_contiene_mortero(linea.get("codigo"))
+        or texto_contiene_mortero(linea.get("concepto"))
+    )
+
+
+def _hay_hormigon_en_linea(linea: dict) -> bool:
+    ctx = linea.get("contexto_linea")
+    if isinstance(ctx, dict):
+        if str(ctx.get("tipo_familia") or "").strip().lower() == "hormigon":
+            return True
+        if texto_contiene_hormigon(ctx.get("descripcion_extendida")):
+            return True
+    # Red de seguridad: designación HA-XX en el código o el concepto.
+    return (
+        texto_contiene_hormigon(linea.get("codigo"))
+        or texto_contiene_hormigon(linea.get("concepto"))
     )
 
 
@@ -106,10 +138,14 @@ def resolver_tipologia(
 
     # --- Familia dominante de las líneas --------------------------- #
     fams = _familias(lineas)
+    hay_hormigon = any(_hay_hormigon_en_linea(l) for l in lineas)
+    hay_mortero = any(_hay_mortero_en_linea(l) for l in lineas)
     if "residuos" in fams:
         por_familia = Tipologia.RESIDUOS
-    elif "hormigon" in fams:
+    elif "hormigon" in fams or hay_hormigon:
         por_familia = Tipologia.HORMIGON
+    elif "mortero" in fams or hay_mortero:
+        por_familia = Tipologia.MORTERO
     else:
         por_familia = Tipologia.GENERICO
 

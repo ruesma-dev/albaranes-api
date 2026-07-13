@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import mimetypes
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -50,6 +51,10 @@ class ReviewAlbaranRequest:
     # Lo genera sv3 (POST /v1/sigrid/header-grounding), lo reenvía sv7
     # y aquí se inyecta en el prompt de fase 2. None → fase 2 clásica.
     sigrid_context: dict | None = None
+    # Etapa 4-IA (jul 2026): clave del prompt de fase 2 elegida por
+    # tipología (p.ej. albaran_revision_fase2_residuos). Si es None o no
+    # está registrada, el pipeline cae al genérico (prompt_key_phase_2).
+    prompt_key: str | None = None
 
 
 class ExtractAlbaranPipeline:
@@ -103,10 +108,14 @@ class ExtractAlbaranPipeline:
             mime_type=request.mime_type,
             file_bytes=request.file_bytes,
         )
+        # Prompt de fase 2 por tipología si existe; si no, el genérico.
+        prompt_key_fase2 = self._prompt_key_phase_2
+        if request.prompt_key and self._service.has_prompt(request.prompt_key):
+            prompt_key_fase2 = request.prompt_key
         result = self._service.review_phase_2(
             attachment=attachment,
             provider=self._provider_phase_2,
-            prompt_key=self._prompt_key_phase_2,
+            prompt_key=prompt_key_fase2,
             phase_1_json=request.phase_1_json,
             sigrid_context=request.sigrid_context,
         )
@@ -156,12 +165,32 @@ class ExtractAlbaranPipeline:
             or filename.lower().endswith(".pdf")
         )
         if is_pdf:
-            return LlmAttachment(
-                kind="pdf",
-                filename=filename,
-                mime_type="application/pdf",
-                data=file_bytes,
+            # Preproceso opcional (PREPROCESO_IMAGEN, default true): si el
+            # PDF es ESCANEADO (sin texto), se realza la imagen para que la
+            # IA lea mejor los manuscritos tenues. Los PDF con texto se
+            # mandan tal cual. Best-effort: ante fallo, PDF crudo.
+            _activar = (
+                os.environ.get("PREPROCESO_IMAGEN", "true").lower() == "true"
             )
+            try:
+                from ruesma_comun.imaging.preprocess import preparar_para_ia
+
+                _kind, _mime, _data = preparar_para_ia(
+                    file_bytes, activar=_activar
+                )
+                return LlmAttachment(
+                    kind=_kind,
+                    filename=filename,
+                    mime_type=_mime,
+                    data=_data,
+                )
+            except Exception:  # noqa: BLE001 - best-effort
+                return LlmAttachment(
+                    kind="pdf",
+                    filename=filename,
+                    mime_type="application/pdf",
+                    data=file_bytes,
+                )
 
         guessed_mime, _ = mimetypes.guess_type(filename)
         final_mime = mime_type or guessed_mime or "image/jpeg"
