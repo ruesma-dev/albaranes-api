@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Iterable, Type
+from typing import Any, Iterable, Optional, Sequence, Type
 
 from google.api_core.client_options import ClientOptions
 from google.cloud import documentai
@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from domain.models.llm_attachment import LlmAttachment
 from domain.ports.llm_client import LlmVisionClient
+from ruesma_comun.llm.llm_client import normalizar_adjuntos
 
 logger = logging.getLogger(__name__)
 
@@ -165,23 +166,41 @@ class GoogleDocumentAiVisionClient(LlmVisionClient):
         model: str,
         instructions: str,
         user_text: str,
-        attachment: LlmAttachment,
+        attachment: Optional[LlmAttachment] = None,
+        attachments: Optional[Sequence[LlmAttachment]] = None,
         response_model: Type[BaseModel],
     ) -> BaseModel:
+        # (jul 2026) Este proveedor OCR analiza UN documento por
+        # peticion: si llegan varias paginas (imagen por pagina del
+        # preprocesado), se usa la PRIMERA y se avisa. Los proveedores
+        # LLM (claude/openai/gemini) si aprovechan todas las paginas.
+        adjuntos = normalizar_adjuntos(attachment, attachments)
+        if not adjuntos:
+            raise ValueError(
+                "Google Document AI requiere un adjunto (no soporta texto puro)."
+            )
+        if len(adjuntos) > 1:
+            logger.warning(
+                "Google Document AI: %s adjuntos recibidos; solo se analiza "
+                "el primero (%s)",
+                len(adjuntos),
+                adjuntos[0].filename,
+            )
+        adjunto = adjuntos[0]
         logger.info(
             "Google Document AI call. model=%s kind=%s filename=%s mime=%s size=%s schema=%s",
             model,
-            attachment.kind,
-            attachment.filename,
-            attachment.mime_type,
-            len(attachment.data),
+            adjunto.kind,
+            adjunto.filename,
+            adjunto.mime_type,
+            len(adjunto.data),
             response_model.__name__,
         )
         request = documentai.ProcessRequest(
             name=self._processor_name(),
             raw_document=documentai.RawDocument(
-                content=attachment.data,
-                mime_type=attachment.mime_type,
+                content=adjunto.data,
+                mime_type=adjunto.mime_type,
             ),
         )
         result = self._client.process_document(request=request)

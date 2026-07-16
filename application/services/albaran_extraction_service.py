@@ -94,7 +94,7 @@ class AlbaranExtractionService:
     def extract_phase_1(
         self,
         *,
-        attachment: LlmAttachment,
+        attachments: list[LlmAttachment],
         provider: str,
         prompt_key: str,
     ) -> ProviderExtractionResult:
@@ -112,14 +112,15 @@ class AlbaranExtractionService:
             "Extracción FASE 1 proveedor=%s prompt_key=%s schema=%s "
             "model=%s filename=%s",
             spec.provider, prompt_key, prompt_spec.schema,
-            spec.model_name, attachment.filename,
+            spec.model_name,
+            attachments[0].filename if attachments else "n/a",
         )
 
         return self._invoke_provider(
             spec=spec,
             instructions=instructions,
             user_text=user_text,
-            attachment=attachment,
+            attachments=attachments,
             response_model=response_model,
             schema_name=prompt_spec.schema,
             prompt_key=prompt_key,
@@ -132,7 +133,7 @@ class AlbaranExtractionService:
     def review_phase_2(
         self,
         *,
-        attachment: LlmAttachment,
+        attachments: list[LlmAttachment],
         provider: str,
         prompt_key: str,
         phase_1_json: dict,
@@ -225,7 +226,8 @@ class AlbaranExtractionService:
             "model=%s filename=%s json_fase1_chars=%d "
             "rules_count=%d sigrid_grounding=%s",
             spec.provider, prompt_key, prompt_spec.schema,
-            spec.model_name, attachment.filename,
+            spec.model_name,
+            attachments[0].filename if attachments else "n/a",
             len(json_fase_1_text),
             self._revision_rules_repo.count,
             "SI" if sigrid_context is not None else "NO",
@@ -235,7 +237,7 @@ class AlbaranExtractionService:
             spec=spec,
             instructions=instructions,
             user_text=user_text,
-            attachment=attachment,
+            attachments=attachments,
             response_model=response_model,
             schema_name=prompt_spec.schema,
             prompt_key=prompt_key,
@@ -419,7 +421,7 @@ class AlbaranExtractionService:
         spec: ProviderClientSpec,
         instructions: str,
         user_text: str,
-        attachment: LlmAttachment,
+        attachments: list[LlmAttachment],
         response_model: Type[BaseModel],
         schema_name: str,
         prompt_key: str,
@@ -430,7 +432,7 @@ class AlbaranExtractionService:
             model=spec.model_name,
             instructions=instructions,
             user_text=user_text,
-            attachment=attachment,
+            attachments=attachments,
             response_model=response_model,
         )
 
@@ -449,7 +451,7 @@ class AlbaranExtractionService:
                 "model": spec.model_name,
                 "prompt_key": prompt_key,
                 "phase": phase_label,
-                "attachment": self._attachment_debug(attachment),
+                "attachment": self._attachments_debug(attachments),
                 "prompt_note": prompt_note,
             },
             f"{spec.provider}_response": {
@@ -473,11 +475,20 @@ class AlbaranExtractionService:
         )
 
     @staticmethod
-    def _attachment_debug(attachment: LlmAttachment) -> Dict[str, Any]:
-        return {
-            "kind": attachment.kind,
-            "filename": attachment.filename,
-            "mime_type": attachment.mime_type,
-            "size_bytes": len(attachment.data),
-            "sha256": hashlib.sha256(attachment.data).hexdigest(),
-        }
+    def _attachments_debug(
+        attachments: list[LlmAttachment],
+    ) -> Any:
+        def _uno(att: LlmAttachment) -> Dict[str, Any]:
+            return {
+                "kind": att.kind,
+                "filename": att.filename,
+                "mime_type": att.mime_type,
+                "size_bytes": len(att.data),
+                "sha256": hashlib.sha256(att.data).hexdigest(),
+            }
+
+        if not attachments:
+            return {"kind": "text_only"}
+        if len(attachments) == 1:
+            return _uno(attachments[0])
+        return [_uno(a) for a in attachments]

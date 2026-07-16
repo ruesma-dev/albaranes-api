@@ -81,20 +81,22 @@ class ExtractAlbaranPipeline:
     # FASE 1 — extracción inicial.
     # ----------------------------------------------------------- #
     def run_phase_1(self, request: ExtractAlbaranRequest) -> Dict[str, Any]:
-        attachment = self._build_attachment_validated(
+        attachments = self._build_attachments_validated(
             filename=request.filename,
             mime_type=request.mime_type,
             file_bytes=request.file_bytes,
         )
         result = self._service.extract_phase_1(
-            attachment=attachment,
+            attachments=attachments,
             provider=self._provider_phase_1,
             prompt_key=self._prompt_key_phase_1,
         )
         sha256 = hashlib.sha256(request.file_bytes).hexdigest()
         return self._envelope_block(
             provider_result=result,
-            attachment=attachment,
+            source_filename=request.filename,
+            source_mime_type=request.mime_type,
+            n_adjuntos=len(attachments),
             sha256=sha256,
             phase_label="phase_1",
         )
@@ -103,7 +105,7 @@ class ExtractAlbaranPipeline:
     # FASE 2 — revisión sobre la imagen + JSON de fase 1.
     # ----------------------------------------------------------- #
     def run_phase_2(self, request: ReviewAlbaranRequest) -> Dict[str, Any]:
-        attachment = self._build_attachment_validated(
+        attachments = self._build_attachments_validated(
             filename=request.filename,
             mime_type=request.mime_type,
             file_bytes=request.file_bytes,
@@ -113,7 +115,7 @@ class ExtractAlbaranPipeline:
         if request.prompt_key and self._service.has_prompt(request.prompt_key):
             prompt_key_fase2 = request.prompt_key
         result = self._service.review_phase_2(
-            attachment=attachment,
+            attachments=attachments,
             provider=self._provider_phase_2,
             prompt_key=prompt_key_fase2,
             phase_1_json=request.phase_1_json,
@@ -122,7 +124,9 @@ class ExtractAlbaranPipeline:
         sha256 = hashlib.sha256(request.file_bytes).hexdigest()
         return self._envelope_block(
             provider_result=result,
-            attachment=attachment,
+            source_filename=request.filename,
+            source_mime_type=request.mime_type,
+            n_adjuntos=len(attachments),
             sha256=sha256,
             phase_label="phase_2",
         )
@@ -130,13 +134,13 @@ class ExtractAlbaranPipeline:
     # ----------------------------------------------------------- #
     # Helpers privados.
     # ----------------------------------------------------------- #
-    def _build_attachment_validated(
+    def _build_attachments_validated(
         self,
         *,
         filename: str,
         mime_type: str,
         file_bytes: bytes,
-    ) -> LlmAttachment:
+    ) -> list[LlmAttachment]:
         if not file_bytes:
             raise ValueError("Archivo vacío.")
 
@@ -147,18 +151,29 @@ class ExtractAlbaranPipeline:
                 f"MAX_FILE_MB={self._max_file_mb}"
             )
 
-        return self._build_attachment(
+        return self._build_attachments(
             filename=filename,
             mime_type=mime_type,
             file_bytes=file_bytes,
         )
 
     @staticmethod
-    def _build_attachment(
+    def _flag_env(nombre: str, defecto: str) -> bool:
+        return os.environ.get(nombre, defecto).lower() == "true"
+
+    @staticmethod
+    def _int_env(nombre: str, defecto: int) -> int:
+        try:
+            return int(os.environ.get(nombre, str(defecto)))
+        except ValueError:
+            return defecto
+
+    @staticmethod
+    def _build_attachments(
         filename: str,
         mime_type: str,
         file_bytes: bytes,
-    ) -> LlmAttachment:
+    ) -> list[LlmAttachment]:
         filename = filename or "document.bin"
         is_pdf = (
             mime_type == "application/pdf"
@@ -167,39 +182,69 @@ class ExtractAlbaranPipeline:
         if is_pdf:
             # Preproceso opcional (PREPROCESO_IMAGEN, default true): si el
             # PDF es ESCANEADO (sin texto), se realza la imagen para que la
-            # IA lea mejor los manuscritos tenues. Los PDF con texto se
-            # mandan tal cual. Best-effort: ante fallo, PDF crudo.
-            _activar = (
-                os.environ.get("PREPROCESO_IMAGEN", "true").lower() == "true"
-            )
+            # IA lea mejor los manuscritos tenues y se manda UNA IMAGEN
+            # POR PAGINA (jul 2026: rinde mucho mejor que la tira apilada
+            # porque las APIs de vision reescalan las imagenes grandes).
+            # Los PDF con texto se mandan tal cual. Best-effort: ante
+            # fallo, PDF crudo. Flags de la cadena (ver ruesma_comun/
+            # imaging/preprocess.py): PREPROCESO_IMAGEN,
+            # PREPROCESO_ILUMINACION, PREPROCESO_DENOISE,
+            # PREPROCESO_DESKEW, PREPROCESO_DPI, PREPROCESO_MAX_PAGINAS.
+            _p = ExtractAlbaranPipeline
             try:
-                from ruesma_comun.imaging.preprocess import preparar_para_ia
+                from ruesma_comun.imaging.preprocess import (
+                    preparar_adjuntos_para_ia,
+                )
 
-                _kind, _mime, _data = preparar_para_ia(
-                    file_bytes, activar=_activar
+                tuplas = preparar_adjuntos_para_ia(
+                    file_bytes,
+                    activar=_p._flag_env("PREPROCESO_IMAGEN", "true"),
+                    dpi=_p._int_env("PREPROCESO_DPI", 200),
+                    iluminacion=_p._flag_env(
+                        "PREPROCESO_ILUMINACION", "true"
+                    ),
+                    denoise=_p._flag_env("PREPROCESO_DENOISE", "false"),
+                    deskew=_p._flag_env("PREPROCESO_DESKEW", "true"),
+                    max_paginas=_p._int_env("PREPROCESO_MAX_PAGINAS", 10),
                 )
-                return LlmAttachment(
-                    kind=_kind,
-                    filename=filename,
-                    mime_type=_mime,
-                    data=_data,
-                )
+                stem = filename.rsplit(".", 1)[0] or "document"
+                out: list[LlmAttachment] = []
+                for i, (_kind, _mime, _data) in enumerate(tuplas, start=1):
+                    if _kind == "pdf":
+                        nombre_i = filename
+                    elif len(tuplas) == 1:
+                        nombre_i = f"{stem}.jpg"
+                    else:
+                        nombre_i = f"{stem}_p{i}.jpg"
+                    out.append(
+                        LlmAttachment(
+                            kind=_kind,
+                            filename=nombre_i,
+                            mime_type=_mime,
+                            data=_data,
+                        )
+                    )
+                return out
             except Exception:  # noqa: BLE001 - best-effort
-                return LlmAttachment(
-                    kind="pdf",
-                    filename=filename,
-                    mime_type="application/pdf",
-                    data=file_bytes,
-                )
+                return [
+                    LlmAttachment(
+                        kind="pdf",
+                        filename=filename,
+                        mime_type="application/pdf",
+                        data=file_bytes,
+                    )
+                ]
 
         guessed_mime, _ = mimetypes.guess_type(filename)
         final_mime = mime_type or guessed_mime or "image/jpeg"
-        return LlmAttachment(
-            kind="image",
-            filename=filename,
-            mime_type=final_mime,
-            data=file_bytes,
-        )
+        return [
+            LlmAttachment(
+                kind="image",
+                filename=filename,
+                mime_type=final_mime,
+                data=file_bytes,
+            )
+        ]
 
     @staticmethod
     def _utc_iso() -> str:
@@ -209,18 +254,24 @@ class ExtractAlbaranPipeline:
         self,
         *,
         provider_result: ProviderExtractionResult,
-        attachment: LlmAttachment,
+        source_filename: str,
+        source_mime_type: str,
+        n_adjuntos: int,
         sha256: str,
         phase_label: str,
     ) -> Dict[str, Any]:
+        # (jul 2026) meta conserva el nombre/mime del ARCHIVO ORIGINAL
+        # (antes venia del attachment, que coincidia); n_adjuntos indica
+        # cuantas imagenes/PDF se mandaron a la IA (1 pagina = 1 imagen).
         meta = {
             "phase": phase_label,
             "prompt_key": provider_result.prompt_key,
             "schema": provider_result.schema_name,
             "provider": provider_result.provider,
             "model": provider_result.model_name,
-            "source_filename": attachment.filename,
-            "source_mime_type": attachment.mime_type,
+            "source_filename": source_filename,
+            "source_mime_type": source_mime_type,
+            "source_attachments": n_adjuntos,
             "source_sha256": sha256,
             "processed_at_utc": self._utc_iso(),
             "service": "albaranes-extractor-api",
